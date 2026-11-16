@@ -1,4 +1,4 @@
-# Platform Support for NVXSched
+# Platform Support for AclXSched
 
 ## Structure
 
@@ -7,7 +7,8 @@ Each platform adapter is split into two parts:
 - `hal`: the XPU adapter layer (XAL). It implements XSched's `HwCommand` and `HwQueue` abstractions on top of the platform driver/runtime APIs.
 - `shim`: the transparent interception layer (XShim). It intercepts application API calls and redirects asynchronous commands to XQueues when XSched is enabled.
 
-NVXSched extends the CUDA adapter with memory access prediction and memory scheduling.
+AclXSched focuses on the Ascend adapter, which currently implements transparent Level-1 compute scheduling.
+The shared memory scheduling infrastructure and CUDA adapter are inherited from NVXSched; Ascend memory scheduling is under development.
 Some platforms also provide language bindings or platform-specific tests.
 
 ## XAL
@@ -23,7 +24,7 @@ Common `HwCommand` interfaces:
 | EnableSynchronization() | Enable synchronization, for example by recording an event after the command |
 | Predict()               | Predict execution time and memory accesses at XQueue submission             |
 
-`HwQueue` is an abstraction of real device queue (such as `zeCommandQueue` and `zeImmediateCommandList` in LevelZero, `CUstream` in CUDA). We need to implement different functions to support different preemption level.
+`HwQueue` is an abstraction of a real device queue, such as `aclrtStream` in AscendCL or `CUstream` in CUDA. Different functions support different preemption levels.
 
 <table>
   <tr>
@@ -69,10 +70,11 @@ Sections 4 and 5 of the [XSched paper](../docs/xsched-osdi25.pdf) describe this 
 ### Memory Scheduling Interfaces
 
 Memory scheduling extends the adapter with access prediction and memory management.
+The current Ascend adapter does not implement these extensions; the interfaces below describe shared infrastructure retained for this work.
 Commands provide their predicted accesses through `Predict()`, and an `HwMemoryManager` implements device allocation, release, memory advice, and page fault feedback.
 XPreempt accesses this manager through the `XMemoryManager` associated with each HwQueue, which tracks allocations and applies advice to the predicted working set.
 
-The CUDA implementation uses managed allocations to move pages between GPU and host memory, UVM driver interfaces to control page placement, and CUPTI records to associate page faults with kernels.
+The inherited CUDA implementation uses managed allocations to move pages between GPU and host memory, UVM driver interfaces to control page placement, and CUPTI records to associate page faults with kernels.
 See the [CUDA guide](cuda/README.md) for the implementation and driver requirements.
 
 ## XShim
@@ -83,11 +85,18 @@ It intercepts the platform API calls that create queues, submit asynchronous wor
 - `intercept.cpp` exports intercepted platform symbols and redirects them.
 - `shim.cpp` implements XSched-specific handling for those symbols.
 
-The CUDA shim additionally redirects supported device allocations to managed memory, enabling memory oversubscription without application changes.
+The inherited CUDA shim additionally redirects supported device allocations to managed memory, enabling memory oversubscription without application changes.
+The current Ascend shim does not redirect allocations for oversubscription.
 
-## Supported Platforms
+## Ascend Support
 
-The following adapters are inherited from XSched. Memory scheduling currently targets CUDA on Linux.
+AscendCL is the primary adapter maintained in this repository.
+See the [Ascend guide](ascend/README.md) for its support status, build instructions, and usage.
+
+## Inherited Platform Adapters
+
+The following adapters are retained from XSched / NVXSched as references.
+Their configuration and examples are platform-specific; the inherited memory scheduling implementation targets CUDA on Linux.
 
 | Name      | Usage                         |
 | --------- | ----------------------------- |
@@ -96,7 +105,6 @@ The following adapters are inherited from XSched. Memory scheduling currently ta
 | HIP       | [README](hip/README.md)       |
 | LevelZero | [README](levelzero/README.md) |
 | OpenCL    | [README](opencl/README.md)    |
-| AscendCL  | [README](ascend/README.md)    |
 | cuDLA     | [README](cudla/README.md)     |
 | VPI       | [README](vpi/README.md)       |
 

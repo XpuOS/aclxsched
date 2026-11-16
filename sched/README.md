@@ -1,11 +1,11 @@
-# Scheduling Module for NVXSched
+# Scheduling Module for AclXSched
 
 ## Schedulers
 
 ### Application Managed Scheduler
 
 `AppManagedScheduler` is an empty scheduler.
-Users need to call NVXSched APIs manually (refer to [NVXSched API](../include/README.md)) to control XQueues.
+Users need to call AclXSched APIs manually (refer to [AclXSched API](../include/README.md)) to control XQueues.
 This is the default scheduler (`APP`).
 
 ### Local Scheduler

@@ -1,6 +1,6 @@
-# Use NVXSched Explicitly
+# Use AclXSched Explicitly
 
-Applications can use NVXSched's APIs to control XQueues, provide scheduling hints, and prepare GPU memory explicitly.
+Applications can use AclXSched's APIs to control XQueues and provide scheduling hints.
 These interfaces retain XSched's public header and function names.
 
 ## Example
@@ -14,6 +14,9 @@ Applications can either manage XQueues themselves or use the hints in [hint.h](.
 The associated flags, enum definitions, and result codes are declared in [types.h](./xsched/types.h).
 
 ## Memory Scheduling
+
+These APIs and the CUDA example below are inherited from NVXSched.
+The current Ascend adapter does not provide a memory manager, so memory advice and prediction modes do not enable memory scheduling on Ascend.
 
 An XQueue's memory context describes the regions needed by its upcoming work.
 CUDA memory scheduling uses this context to prepare managed allocations through the modified UVM driver.

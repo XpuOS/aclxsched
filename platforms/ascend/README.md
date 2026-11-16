@@ -1,4 +1,4 @@
-# AscendCL Platform Support for XSched
+# AscendCL Platform Support for AclXSched
 
 The AscendCL adapter supports transparent Level-1 scheduling for Ascend NPU applications. It intercepts AscendCL events, memcpy, synchronization, and single-operator execution APIs, then submits asynchronous work to XSched XQueues.
 

@@ -1,4 +1,4 @@
-# NVXSched Service
+# AclXSched Service
 
 ## XClient
 
@@ -6,14 +6,14 @@
 
 ### Usage
 
-You can run it by `./output/bin/xcli` in the root directory of NVXSched after compiling.
+You can run it by `./output/bin/xcli` in the root directory of AclXSched after compiling.
 
 The parameters it accepts are as follows:
 
 | Usage       | Type   | Description                   | Default   |
 | ----------- | ------ | ----------------------------- | --------- |
-| `-a,--addr` | string | NVXSched server ipv4 address. | 127.0.0.1 |
-| `-p,--port` | int    | NVXSched server port.         | 50000     |
+| `-a,--addr` | string | AclXSched server ipv4 address. | 127.0.0.1 |
+| `-p,--port` | int    | AclXSched server port.         | 50000     |
 
 The subcommands it supports are as follows:
 
@@ -63,7 +63,7 @@ The subcommands it supports are as follows:
   </tr>
   <tr>
     <td align="center" rowspan="2">policy</td>
-    <td align="center" rowspan="2">Query or set the scheduler policy of the NVXSched server.</td>
+    <td align="center" rowspan="2">Query or set the scheduler policy of the AclXSched server.</td>
     <td align="center">-q,--query</td>
     <td align="center">-</td>
     <td align="center">-</td>
@@ -75,7 +75,7 @@ The subcommands it supports are as follows:
    </tr>
    <tr>
     <td align="center" rowspan="5">hint</td>
-    <td align="center" rowspan="5">Give a hint to the NVXSched server.</td>
+    <td align="center" rowspan="5">Give a hint to the AclXSched server.</td>
     <td align="center">-x,--xqueue</td>
     <td align="center">uint64_t</td>
     <td align="center">-</td>
@@ -104,6 +104,8 @@ The subcommands it supports are as follows:
 
 ### Examples
 
+Ascend queues are created at Level-1 and do not support dynamic level changes, so omit `-l` / `--level` when configuring them.
+
 Use `top` to monitor activity or `list` to find the queue handles and process IDs used in later commands.
 The following example selects `HPF` and sets the priority of a queue; replace `xqueue_handle` with the handle reported by `list`:
 
@@ -114,11 +116,11 @@ The following example selects `HPF` and sets the priority of a queue; replace `x
 ./output/bin/xcli list
 # Change the configuration of the XQueues
 ./output/bin/xcli config -x xqueue_handle -l 1 -t 16 -b 8
-# Query the scheduler policy of the NVXSched server
+# Query the scheduler policy of the AclXSched server
 ./output/bin/xcli policy -q
-# Set the scheduler policy of the NVXSched server
+# Set the scheduler policy of the AclXSched server
 ./output/bin/xcli policy -s -n HPF
-# Give a hint to the NVXSched server
+# Give a hint to the AclXSched server
 ./output/bin/xcli hint -x xqueue_handle -p 10
 ```
 
@@ -148,7 +150,7 @@ XServer maintains a global mirror of each process's XQueue status (ready or idle
 
 ### Run
 
-You can run xserver by `./output/bin/xserver` in the root directory of NVXSched after compiling.
+You can run xserver by `./output/bin/xserver` in the root directory of AclXSched after compiling.
 
 The default policy is `HPF`, default port is 50000. You can change them by parameters:
 
@@ -161,4 +163,5 @@ The default policy is `HPF`, default port is 50000. You can change them by param
 
 After starting the server, set `XSCHED_SCHEDULER=GLB` and unset `XSCHED_POLICY` in each application to connect it to global scheduling.
 Applications exchange scheduling events and operations with XServer through IPC; the HTTP port is used by XCLI.
-See the [CUDA guide](../platforms/cuda/README.md#usage) for complete application configuration, including the prediction and driver settings for memory scheduling.
+See the [Ascend guide](../platforms/ascend/README.md#usage) for complete application configuration.
+Ascend queues currently support Level-1 scheduling only, without dynamic preemption level changes or memory scheduling.

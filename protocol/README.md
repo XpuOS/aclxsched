@@ -1,6 +1,6 @@
 # Protocol
 
-`protocol` defines macros and constants used in NVXSched.
+`protocol` defines macros and constants used in AclXSched.
 It also provides helper functions to read these values.
 
 The following configurations can be changed with environment variables.

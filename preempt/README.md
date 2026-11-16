@@ -20,7 +20,7 @@ The XPreempt library mainly includes following parts:
 ### Memory Context
 
 Memory scheduling needs to know which regions a queue will access during its next timeslice.
-NVXSched represents this working set as a memory context, built from the access and execution-time predictions attached to commands when they are submitted.
+AclXSched represents this working set as a memory context, built from the access and execution-time predictions attached to commands when they are submitted.
 XQueue walks the commands it still tracks in submission order, accumulates their estimated execution times, and combines the accesses that fall within the requested period.
 
 This traversal covers both the launch worker's command log and the pending buffer, counting each command once.

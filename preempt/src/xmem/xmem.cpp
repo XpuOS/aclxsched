@@ -77,3 +77,22 @@ std::shared_ptr<Region> XMemoryManager::GetAllocatedMemory()
     }
     return region;
 }
+
+std::vector<std::pair<void *, size_t>> XMemoryManager::Intersect(const Region &region)
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    std::vector<std::pair<void *, size_t>> ranges;
+    region.ForEach([&](uint64_t begin, uint64_t end) {
+        auto it = allocated_.upper_bound(reinterpret_cast<void *>(begin));
+        if (it != allocated_.begin()) --it;
+        for (; it != allocated_.end(); ++it) {
+            const auto &[ptr, size] = *it;
+            const auto base = reinterpret_cast<uintptr_t>(ptr);
+            if (base >= end) break;
+            const auto lo = std::max<uint64_t>(begin, base);
+            const auto hi = std::min<uint64_t>(end, base + size);
+            if (lo < hi) ranges.emplace_back(reinterpret_cast<void *>(lo), hi - lo);
+        }
+    });
+    return ranges;
+}

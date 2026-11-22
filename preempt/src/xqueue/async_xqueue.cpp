@@ -48,7 +48,9 @@ void AsyncXQueue::Submit(std::shared_ptr<HwCommand> hw_cmd)
     hw_cmd->OnSubmit(shared_from_this());
     hw_cmd->SetIdx(next_hw_cmd_idx_.fetch_add(1));
     kHwQueue->OnHwCommandSubmit(hw_cmd);
-    hw_cmd->Predict(mem_ctx_type_, xmm_);
+    // xvmm residency always needs per-command buffers, independently of the
+    // queue's Advise context type.
+    hw_cmd->Predict(kHwQueue->UsesBatchMemory() ? kMemoryContextBuffer : mem_ctx_type_, xmm_);
     cmd_buf_->Enqueue(hw_cmd);
     if (hw_cmd->GetProps(kCommandPropertyBlockingSubmit)) hw_cmd->WaitUntil(kCommandStateInFlight);
 }

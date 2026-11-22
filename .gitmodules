@@ -19,3 +19,7 @@
 [submodule "3rdparty/nvidia-kmd"]
 	path = 3rdparty/nvidia-kmd
 	url = https://github.com/XpuOS/nvidia-kmd.git
+
+[submodule "3rdparty/xvmm"]
+	path = 3rdparty/xvmm
+	url = https://github.com/XpuOS/xvmm.git

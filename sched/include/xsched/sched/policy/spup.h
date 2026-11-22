@@ -21,7 +21,7 @@ public:
     virtual void RecvHint(std::shared_ptr<const Hint> hint) override;
 
 private:
-    void RoundRobin(const Status &status);
+    void RoundRobin(const Status &status, bool head_changed);
     uint64_t GetOverheadUs(const Status &status, PID pid);
 
     std::set<PID> pid_in_queue_;

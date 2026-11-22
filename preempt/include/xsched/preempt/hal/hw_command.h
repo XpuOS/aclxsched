@@ -68,6 +68,10 @@ public:
     /// NOTE: This function will be called without holding the launch worker lock.
     virtual void BeforeLaunch() {}
 
+    /// Called outside the launch worker lock after device completion, before
+    /// publishing Completed. May release backend resources through blocking IPC.
+    virtual void OnCompleted() {}
+
     /// @brief Get the handle of the HwCommand.
     /// @return The handle of the HwCommand, which is unique on the system.
     virtual HwCommandHandle GetHandle() {return (uint64_t)this ^ ((uint64_t)GetProcessId() << 48);}

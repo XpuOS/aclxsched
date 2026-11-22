@@ -18,17 +18,17 @@ public:
 
     static void SendHint(std::shared_ptr<const sched::Hint> hint)
     {
-        g_sched_agent.RelayHint(hint);
+        Instance().RelayHint(hint);
     }
 
     static void SendEvent(std::shared_ptr<const sched::Event> event)
     {
-        g_sched_agent.RelayEvent(event);
+        Instance().RelayEvent(event);
     }
 
     static XResult SetScheduler(XSchedulerType scheduler, XPolicyType policy)
     {
-        return g_sched_agent.ReplaceScheduler(scheduler, policy);
+        return Instance().ReplaceScheduler(scheduler, policy);
     }
 
 private:
@@ -39,7 +39,7 @@ private:
     void FiniScheduler();
 
     std::shared_ptr<sched::Scheduler> scheduler_ = nullptr;
-    static SchedAgent g_sched_agent;
+    static SchedAgent &Instance();
 };
 
 } // namespace xsched::preempt

@@ -96,7 +96,16 @@ void LaunchWorker::WorkerLoop()
         {
             auto hw_cmd = std::dynamic_pointer_cast<HwCommand>(xcmd);
             XASSERT(hw_cmd != nullptr, "command type mismatch");
-            LaunchHwCommand(hw_cmd);
+            if (kHwq->UsesBatchMemory() && !std::dynamic_pointer_cast<HwCallbackCommand>(hw_cmd)) {
+                CommandLog batch{hw_cmd};
+                if (!hw_cmd->Synchronizable() && !hw_cmd->GetProps(kCommandPropertyBlockingSubmit)) {
+                    for (auto command : kCmdBuf->TakeHardwareCommands(size_t(batch_size_ - 1)))
+                        batch.push_back(std::move(command));
+                }
+                LaunchHwBatch(std::move(batch));
+            } else {
+                LaunchHwCommand(hw_cmd);
+            }
             break;
         }
 
@@ -262,12 +271,62 @@ void LaunchWorker::LaunchHwCommand(std::shared_ptr<HwCommand> hw_cmd)
     }
 }
 
+void LaunchWorker::LaunchHwBatch(CommandLog batch)
+{
+    XASSERT(level_ == kPreemptLevelBlock, "batch memory requires block-level preemption");
+    for (const auto &command : batch) command->BeforeLaunch();
+    std::unique_lock<MutexLock> lock(*mtx_);
+    // Preserve the completion boundary after opaque hardware callbacks.
+    if (!cmd_log_.empty() && std::dynamic_pointer_cast<HwCallbackCommand>(cmd_log_.back()))
+        lock = SyncAllWithLock(std::move(lock));
+
+    std::shared_ptr<void> references;
+    for (;;) {
+        while (state_ == kWorkerStatePaused) cv_.wait(lock);
+        while (!batch.empty() && batch.front()->GetIdx() <= drop_idx_) {
+            batch.front()->SetState(kCommandStateCompleted);
+            batch.pop_front();
+        }
+        if (batch.empty()) return;
+        // Apply command-count backpressure before admitting the whole batch.
+        // All queues' referenced working sets must fit the physical budget.
+        if (!cmd_log_.empty() &&
+            cmd_log_.size() + batch.size() > size_t(threshold_)) {
+            lock = sync_cmd_log_.empty() ? SyncAllWithLock(std::move(lock))
+                 : SyncCmdWithLock(std::move(lock), sync_cmd_log_.front());
+            continue;
+        }
+        lock.unlock();
+        references = kHwq->PrepareBatch(batch);
+        lock.lock();
+        if (state_ == kWorkerStateRunning && batch.front()->GetIdx() > drop_idx_) break;
+        lock.unlock();
+        references.reset();
+        lock.lock();
+    }
+
+    auto tail = batch.back();
+    XASSERT(tail->EnableSynchronization(), "batch tail must support synchronization");
+    for (const auto &command : batch) {
+        kHwq->LaunchPrepared(command, command == tail ? std::move(references) : nullptr);
+        command->SetState(kCommandStateInFlight);
+        cmd_log_.push_back(command);
+        if (command->Synchronizable()) {
+            sync_cmd_log_.push_back(command);
+            last_synchronizable_idx_ = command->GetIdx();
+        }
+    }
+    // Completion and Unref are driven by backpressure, idle handling and
+    // explicit waits, allowing the next batch's preparation to overlap this one.
+}
+
 std::unique_lock<MutexLock> LaunchWorker::SyncAllWithLock(std::unique_lock<MutexLock> lock)
 {
+    int64_t completed_idx = -1;
     while (true) {
         // Wait if the worker is paused.
         while (true) {
-            if (state_ == kWorkerStateRunning) {
+            if (state_ == kWorkerStateRunning || kHwq->UsesBatchMemory()) {
                 break;
             } else if (state_ == kWorkerStatePaused) {
                 cv_.wait(lock);
@@ -282,20 +341,22 @@ std::unique_lock<MutexLock> LaunchWorker::SyncAllWithLock(std::unique_lock<Mutex
         if (cmd_log_.size() == 0) return lock;
 
         int64_t current_pause_cnt = pause_count_;
+        completed_idx = cmd_log_.back()->GetIdx();
+        CommandLog completed;
+        if (kHwq->UsesBatchMemory()) completed = cmd_log_;
 
         lock.unlock();
         kHwq->Synchronize();
+        for (const auto &command : completed) command->OnCompleted();
         lock.lock();
 
         // Check if preemption happened during kHwq->Synchronize().
-        if (current_pause_cnt == pause_count_) break;
+        if (current_pause_cnt == pause_count_ || kHwq->UsesBatchMemory()) break;
     }
 
-    // Pop and delete all in-flight HwCommands.
-    sync_cmd_log_.clear();
-
-    for (auto hw_cmd : cmd_log_) hw_cmd->SetState(kCommandStateCompleted);
-    cmd_log_.clear();
+    // Another thread may have submitted a new batch while synchronization or
+    // Unref ran without the worker lock. Retire only the captured prefix.
+    CompleteCommandsThrough(completed_idx);
 
     return lock;
 }
@@ -324,7 +385,7 @@ std::unique_lock<MutexLock> LaunchWorker::SyncCmdWithLock(std::unique_lock<utils
             // 6. this thread wakes up and locks, finds the XQueue is suspended
             if (hw_cmd->GetState() >= kCommandStateCompleted) return lock;
 
-            if (state_ == kWorkerStateRunning) {
+            if (state_ == kWorkerStateRunning || kHwq->UsesBatchMemory()) {
                 break;
             } else if (state_ == kWorkerStatePaused) {
                 cv_.wait(lock);
@@ -340,29 +401,39 @@ std::unique_lock<MutexLock> LaunchWorker::SyncCmdWithLock(std::unique_lock<utils
         if (state == kCommandStateCompleted) break;
 
         int64_t current_pause_cnt = pause_count_;
+        CommandLog completed;
+        if (kHwq->UsesBatchMemory()) {
+            for (const auto &command : cmd_log_) {
+                if (command->GetIdx() > hw_cmd->GetIdx()) break;
+                completed.push_back(command);
+            }
+        }
 
         lock.unlock();
         hw_cmd->Synchronize();
+        for (const auto &command : completed) command->OnCompleted();
         lock.lock();
 
         // Check if preemption happened during hw_cmd->Synchronize().
-        if (current_pause_cnt == pause_count_) break;
+        if (current_pause_cnt == pause_count_ || kHwq->UsesBatchMemory()) break;
     }
 
-    // Pop and delete all HwCommands launched in previous.
-    const int64_t current_command_idx = hw_cmd->GetIdx();
+    CompleteCommandsThrough(hw_cmd->GetIdx());
+    return lock;
+}
 
+void LaunchWorker::CompleteCommandsThrough(int64_t command_idx)
+{
     while (sync_cmd_log_.size() > 0) {
-        if (sync_cmd_log_.front()->GetIdx() > current_command_idx) break;
+        if (sync_cmd_log_.front()->GetIdx() > command_idx) break;
         sync_cmd_log_.pop_front();
     }
 
     while (cmd_log_.size() > 0) {
         auto front_command = cmd_log_.front();
-        if (front_command->GetIdx() > current_command_idx) break;
+        if (front_command->GetIdx() > command_idx) break;
         front_command->SetState(kCommandStateCompleted);
         cmd_log_.pop_front();
     }
 
-    return lock;
 }

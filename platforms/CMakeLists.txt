@@ -57,6 +57,7 @@ function(add_hal_lib platform_name)
     )
 
     if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+        target_link_options(${TARGET_NAME} PRIVATE -Wl,--enable-new-dtags)
         target_link_libraries(${TARGET_NAME}
             PRIVATE utils
             PRIVATE protocol
@@ -64,8 +65,8 @@ function(add_hal_lib platform_name)
             PRIVATE ${HAL_LINK_LIBRARIES}
         )
         set_target_properties(${TARGET_NAME} PROPERTIES
-            INSTALL_RPATH ${CMAKE_INSTALL_PREFIX}/lib
-            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "$ORIGIN"
+            BUILD_WITH_INSTALL_RPATH FALSE
             INSTALL_RPATH_USE_LINK_PATH TRUE
         )
         install(TARGETS ${TARGET_NAME} EXPORT XSchedTargets LIBRARY DESTINATION lib)
@@ -130,6 +131,7 @@ function(add_shim_lib platform_name)
     )
 
     if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+        target_link_options(${TARGET_NAME} PRIVATE -Wl,--enable-new-dtags)
         target_link_libraries(${TARGET_NAME}
             PRIVATE utils
             PRIVATE protocol
@@ -172,8 +174,8 @@ function(add_shim_lib platform_name)
         -Wl,--exclude-libs,ALL # Tell linker to exclude symbols from all static libraries
     )
     set_target_properties(${TARGET_NAME} PROPERTIES
-        INSTALL_RPATH ${CMAKE_INSTALL_PREFIX}/lib
-        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH FALSE
         INSTALL_RPATH_USE_LINK_PATH TRUE
     )
     install(TARGETS ${TARGET_NAME} EXPORT XSchedTargets LIBRARY DESTINATION lib)

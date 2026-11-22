@@ -1,102 +1,65 @@
-# BUILD_TYPE		= Debug / Release
-BUILD_TYPE			= Release
+.DEFAULT_GOAL      := build
+WORK_PATH          := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
-# VERBOSE			= ON / OFF : enable verbose makefile
-VERBOSE				= OFF
+CMAKE              ?= cmake
+CMAKE_ARGS         ?=
+BUILD_TYPE         ?= Release
+VERBOSE            ?= OFF
+SHIM_SOFTLINK      ?= ON
+BUILD_TEST         ?= OFF
+PLATFORM           ?= NONE
 
-# SHIM_SOFTLINK		= ON / OFF : create softlink for shim library on Linux
-SHIM_SOFTLINK		= ON
+BUILD_DIR          ?= $(WORK_PATH)/build
+INSTALL_DIR        ?= $(WORK_PATH)/output
+# Retain the old path variables as optional overrides.
+BUILD_PATH         ?= $(abspath $(BUILD_DIR))
+INSTALL_PATH       ?= $(abspath $(INSTALL_DIR))
 
-# BUILD_TEST		= ON / OFF : build test cases
-BUILD_TEST			= OFF
+XSCHED_ASCEND_XVMM ?= ON
+ASCEND_ENABLE_ATB  ?= ON
+CANN_ROOT          ?=
+ATB_ROOT           ?=
 
-# PLATFORM			= NONE / ascend / corex / cuda / cudla / hip / levelzero / opencl / vpi / template
-PLATFORM			= NONE
-
-ifeq (${OS}, Windows_NT)
-	WORK_PATH		= ${CURDIR}
-	CPU_CORES		= ${NUMBER_OF_PROCESSORS}
-	CMAKE_OS_FLAGS	= -G "MinGW Makefiles" -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-	rm_dir			= @if exist "${1}" rmdir /s /q "${1}"
+ifeq ($(OS),Windows_NT)
+CPU_CORES ?= $(NUMBER_OF_PROCESSORS)
+CMAKE_OS_FLAGS ?= -G "MinGW Makefiles" -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
 else
-	WORK_PATH		= $(dir $(abspath $(lastword ${MAKEFILE_LIST})))
-	CPU_CORES		= $(shell nproc)
-	CMAKE_OS_FLAGS	=
-	rm_dir			= rm -rf ${1}
+CPU_CORES ?= $(shell getconf _NPROCESSORS_ONLN)
+CMAKE_OS_FLAGS ?=
 endif
-
-BUILD_PATH			= ${WORK_PATH}/build
-INSTALL_PATH		= ${WORK_PATH}/output
+JOBS ?= $(CPU_CORES)
+SUPPORTED_PLATFORMS := $(notdir $(patsubst %/,%,$(dir $(wildcard $(WORK_PATH)/platforms/*/CMakeLists.txt))))
 
 define uppercase
 $(subst z,Z,$(subst y,Y,$(subst x,X,$(subst w,W,$(subst v,V,$(subst u,U,$(subst t,T,$(subst s,S,$(subst r,R,$(subst q,Q,$(subst p,P,$(subst o,O,$(subst n,N,$(subst m,M,$(subst l,L,$(subst k,K,$(subst j,J,$(subst i,I,$(subst h,H,$(subst g,G,$(subst f,F,$(subst e,E,$(subst d,D,$(subst c,C,$(subst b,B,$(subst a,A,$(1)))))))))))))))))))))))))))
 endef
 
-.PHONY: build
-build: ${BUILD_PATH}/CMakeCache.txt
-	$(call rm_dir,${INSTALL_PATH})
-	cmake --build ${BUILD_PATH} --target install -- -j${CPU_CORES}
+.PHONY: all configure build install clean $(SUPPORTED_PLATFORMS)
+all: build
 
-${BUILD_PATH}/CMakeCache.txt:
-	${MAKE} configure
-
-.PHONY: configure
+# Reconfigure on every invocation: command-line options must not be lost behind
+# an existing CMakeCache.txt. Explicit OFF values clear previously enabled platforms.
 configure:
-	cmake -B${BUILD_PATH}									\
-		  -DCMAKE_BUILD_TYPE=${BUILD_TYPE}					\
-		  -DCMAKE_VERBOSE_MAKEFILE=${VERBOSE}				\
-		  -DCMAKE_INSTALL_PREFIX=$(abspath $(INSTALL_PATH))	\
-		  -DSHIM_SOFTLINK=${SHIM_SOFTLINK}					\
-		  -DBUILD_TEST=${BUILD_TEST}						\
-		  ${CMAKE_OS_FLAGS}									\
-		  $(foreach p,$(PLATFORM),-DPLATFORM_$(call uppercase,${p})=ON)
+	$(CMAKE) -S "$(WORK_PATH)" -B "$(BUILD_PATH)" $(CMAKE_OS_FLAGS) \
+		-DCMAKE_BUILD_TYPE="$(BUILD_TYPE)" -DCMAKE_VERBOSE_MAKEFILE="$(VERBOSE)" \
+		-DCMAKE_INSTALL_PREFIX="$(abspath $(INSTALL_PATH))" \
+		-DSHIM_SOFTLINK="$(SHIM_SOFTLINK)" -DBUILD_TEST="$(BUILD_TEST)" \
+		-DXSCHED_ASCEND_XVMM="$(XSCHED_ASCEND_XVMM)" -DASCEND_ENABLE_ATB="$(ASCEND_ENABLE_ATB)" \
+		$(if $(strip $(CANN_ROOT)),-DASCEND_CANN_ROOT:PATH="$(CANN_ROOT)") \
+		$(if $(strip $(ATB_ROOT)),-DASCEND_ATB_ROOT:PATH="$(ATB_ROOT)") \
+		$(foreach p,$(SUPPORTED_PLATFORMS),-DPLATFORM_$(call uppercase,$(p))=$(if $(filter $(p),$(PLATFORM)),ON,OFF)) \
+		$(CMAKE_ARGS)
 
-.PHONY: clean
+build: configure
+	$(CMAKE) --build "$(BUILD_PATH)" --target install --parallel "$(JOBS)"
+install: build
+
+$(SUPPORTED_PLATFORMS):
+	+$(MAKE) --no-print-directory build PLATFORM=$@
+
 clean:
-	$(call rm_dir,${BUILD_PATH})
-	$(call rm_dir,${INSTALL_PATH})
-
-.PHONY: ascend
-ascend:
-	${MAKE} clean
-	${MAKE} PLATFORM=ascend
-
-.PHONY: corex
-corex:
-	${MAKE} clean
-	${MAKE} PLATFORM=corex
-
-.PHONY: cuda
-cuda:
-	${MAKE} clean
-	${MAKE} PLATFORM=cuda
-
-.PHONY: cudla
-cudla:
-	${MAKE} clean
-	${MAKE} PLATFORM=cudla
-
-.PHONY: hip
-hip:
-	${MAKE} clean
-	${MAKE} PLATFORM=hip
-
-.PHONY: levelzero
-levelzero:
-	${MAKE} clean
-	${MAKE} PLATFORM=levelzero
-
-.PHONY: opencl
-opencl:
-	${MAKE} clean
-	${MAKE} PLATFORM=opencl
-
-.PHONY: vpi
-vpi:
-	${MAKE} clean
-	${MAKE} PLATFORM=vpi
-
-.PHONY: template
-template:
-	${MAKE} clean
-	${MAKE} PLATFORM=template
+ifneq ($(wildcard $(BUILD_PATH)/CMakeCache.txt),)
+	$(CMAKE) --build "$(BUILD_PATH)" --target clean
+else
+	@echo No configured build directory to clean: "$(BUILD_PATH)"
+endif

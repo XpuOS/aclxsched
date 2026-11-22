@@ -25,14 +25,18 @@ Supports diverse scheduling policies.
 
 Requirements:
 
-- Linux, Git, GNU Make, and CMake 3.14 or later
+- Linux, Git, GNU Make, Python 3.9 or later, and CMake 3.14 or later
 - A C++20 compiler (GCC recommended)
 - An Ascend NPU with its driver and CANN toolkit/runtime installed
+- Ascend Transformer Boost (ATB) headers for the default build
 
-Run the following commands from the project root:
+Run from the project root. For a CANN-only installation, skip the ATB setup and pass `ASCEND_ENABLE_ATB=OFF` to `make ascend`.
 
 ```bash
-git submodule update --init --recursive
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+git submodule update --init --recursive 3rdparty/CLI11 3rdparty/cpp-httplib \
+  3rdparty/ftxui 3rdparty/ipc 3rdparty/jsoncpp
 
 # Build the Ascend HAL, shim, and scheduling service.
 # The default installation directory is output/ under the project root.
@@ -42,6 +46,25 @@ make ascend
 make ascend INSTALL_PATH=/path/to/install
 ```
 
+Set `CANN_ROOT` or `ATB_ROOT` on the `make ascend` command line for a custom SDK installation. Use a separate `BUILD_PATH` when switching SDK installations and separate `INSTALL_PATH` values for builds that need to coexist.
+
+### Ascend xvmm
+
+Building with xvmm requires CMake 3.16 or later. After loading the environments and initializing the dependencies above, initialize the pinned xvmm submodule from GitHub and build with xvmm enabled.
+
+```bash
+git submodule update --init --recursive 3rdparty/xvmm
+make ascend XSCHED_ASCEND_XVMM=ON
+```
+
+Start `ascendvmm-service` in a separate terminal with the CANN environment loaded. This example sets an 8 GiB xvmm budget for device 0.
+
+```bash
+output/bin/ascendvmm-service 0x58560001 0=8589934592
+```
+
+Set `XSCHED_ASCEND_XVMM=ON`, `XVMM_SERVICE_KEY=0x58560001`, and `XVMM_PHYSICAL_DEVICE=0` in the application's environment. Use the `SPUP` policy in `xserver` to enable scheduling-driven prefetch. [Ascend runtime setup](platforms/ascend/README.md#run)
+
 ### Use Cases
 
 #### Transparently Schedule Ascend Applications
@@ -49,13 +72,12 @@ make ascend INSTALL_PATH=/path/to/install
 AclXSched is designed to be transparent to applications.
 By loading the Ascend shim and setting a few [environment variables](protocol/README.md), you can schedule supported Ascend applications without modifying their source code.
 For scheduling across processes, `xserver` coordinates the applications and `xcli` lets you monitor queues or adjust the policy through scheduling hints.
-See the [Ascend usage guide](platforms/ascend/README.md#usage) and [service guide](service/README.md) for details.
+See the [Ascend usage guide](platforms/ascend/README.md#run) and [service guide](service/README.md) for details.
 
 #### Combined Compute and Memory Scheduling
 
-The development goal is to use host memory for data that is not needed immediately and prepare each task's predicted working set before it resumes.
-The Ascend adapter currently has no memory manager, access predictor, or execution-time profiler.
-See the [Ascend support status](platforms/ascend/README.md#support) and the [development plan](#development-plan).
+With xvmm enabled, AclXSched uses host memory for evicted data and can prefetch the incoming task's working set at a scheduling switch.
+See the [xvmm build and runtime options](#ascend-xvmm) for the Ascend setup.
 
 #### Customize Scheduling
 
@@ -97,7 +119,7 @@ The [XSched introduction](docs/xsched-intro-2025-en.md) and its [Chinese version
 
 We will continue to improve AclXSched's scheduling capabilities and support more Ascend NPUs and CANN versions.
 
-- [ ] Implement memory oversubscription and host/device memory migration on Ascend NPUs.
+- [x] Implement memory oversubscription and host/device memory migration on Ascend NPUs.
 - [ ] Support preemption beyond Level-1.
 - [ ] Support spatial multiplexing to schedule NPU tasks running concurrently.
 - [ ] Extend memory scheduling to more scheduling policies.

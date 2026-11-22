@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(XSched VERSION 1.2.0)
+include(GNUInstallDirs)
 
 option(SHIM_SOFTLINK     "Create softlink for shim library."     OFF)
 option(BUILD_TEST        "Build test cases."                     OFF)
+option(XSCHED_ASCEND_XVMM "Build Ascend xvmm support from the pinned submodule." OFF)
+option(ASCEND_ENABLE_ATB "Intercept public Ascend ATB operations." ON)
+if(XSCHED_ASCEND_XVMM AND NOT PLATFORM_ASCEND)
+    message(FATAL_ERROR "XSCHED_ASCEND_XVMM requires PLATFORM_ASCEND=ON")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS OFF)

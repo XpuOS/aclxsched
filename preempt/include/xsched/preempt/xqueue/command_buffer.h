@@ -3,6 +3,7 @@
 #include <list>
 #include <mutex>
 #include <memory>
+#include <vector>
 #include <condition_variable>
 
 #include "xsched/types.h"
@@ -10,6 +11,8 @@
 
 namespace xsched::preempt
 {
+
+class HwCommand;
 
 class CommandBuffer
 {
@@ -24,6 +27,9 @@ public:
     /// @brief Dequeue an XCommand from the CommandBuffer.
     /// @return Pointer to the dequeued XCommand.
     std::shared_ptr<XCommand> Dequeue();
+    // Take only already queued hardware work; stop at a completion/host
+    // dispatch boundary. Never wait for a producer to fill a batch.
+    std::vector<std::shared_ptr<HwCommand>> TakeHardwareCommands(size_t limit);
 
     /// @brief Enqueue an XCommand to the CommandBuffer.
     /// @param xcmd Pointer to the enqueued XCommand.

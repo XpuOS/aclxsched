@@ -16,7 +16,14 @@ using namespace xsched::protocol;
 namespace xsched::preempt
 {
 
-SchedAgent SchedAgent::g_sched_agent;
+// Preloaded compiler helpers can fork shell subshells. Starting a scheduler
+// thread during DSO initialization leaves those fork children with stale locks
+// and joins. Initialize only when the process actually uses XSched.
+SchedAgent &SchedAgent::Instance()
+{
+    static SchedAgent agent;
+    return agent;
+}
 
 SchedAgent::SchedAgent()
 {

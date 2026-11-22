@@ -8,6 +8,10 @@
 #  XSched_VERSION_PATCH - The patch version of XSched
 
 @PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+if(@XSCHED_ASCEND_XVMM@)
+    find_dependency(XVMM 1 CONFIG COMPONENTS CANN HINTS "${CMAKE_CURRENT_LIST_DIR}/../XVMM")
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/XSchedTargets.cmake")
 

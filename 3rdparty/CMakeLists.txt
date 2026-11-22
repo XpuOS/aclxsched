@@ -14,7 +14,9 @@ unset(HTTPLIB_INSTALL CACHE)
 
 add_subdirectory(ipc EXCLUDE_FROM_ALL)
 
-add_subdirectory(cuxtra EXCLUDE_FROM_ALL)
+if(PLATFORM_CUDA)
+    add_subdirectory(cuxtra EXCLUDE_FROM_ALL)
+endif()
 
 set(JSONCPP_WITH_TESTS OFF CACHE BOOL "do not build jsoncpp tests")
 set(JSONCPP_WITH_POST_BUILD_UNITTEST OFF CACHE BOOL "disable jsoncpp post build unit test")
@@ -31,3 +33,11 @@ unset(BUILD_SHARED_LIBS CACHE)
 unset(BUILD_OBJECT_LIBS CACHE)
 
 add_subdirectory(ftxui EXCLUDE_FROM_ALL)
+
+if(XSCHED_ASCEND_XVMM)
+    set(ASCENDVMM_ENABLE_CANN ON)
+    set(ASCENDVMM_BUILD_SERVICE ON)
+    set(ASCENDVMM_INSTALL ON)
+    set(ASCENDVMM_INSTALL_LIBDIR lib)
+    add_subdirectory(xvmm)
+endif()

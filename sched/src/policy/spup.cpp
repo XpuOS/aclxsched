@@ -14,6 +14,8 @@ StrictProcessUtilizationPartitionPolicy::StrictProcessUtilizationPartitionPolicy
 
 void StrictProcessUtilizationPartitionPolicy::Sched(const Status &status)
 {
+    const PID previous_head = run_queue_.empty() ? 0 : run_queue_.front();
+
     // delete all destroyed pids and their utilizations
     for (auto it = utils_.begin(); it != utils_.end();) {
         PID pid = it->first;
@@ -48,7 +50,8 @@ void StrictProcessUtilizationPartitionPolicy::Sched(const Status &status)
         pid_in_queue_.insert(pid);
     }
 
-    RoundRobin(status);
+    const bool head_changed = !run_queue_.empty() && run_queue_.front() != previous_head;
+    RoundRobin(status, head_changed);
 }
 
 void StrictProcessUtilizationPartitionPolicy::RecvHint(std::shared_ptr<const Hint> hint)
@@ -89,7 +92,7 @@ void StrictProcessUtilizationPartitionPolicy::RecvHint(std::shared_ptr<const Hin
     }
 }
 
-void StrictProcessUtilizationPartitionPolicy::RoundRobin(const Status &status)
+void StrictProcessUtilizationPartitionPolicy::RoundRobin(const Status &status, bool head_changed)
 {
     std::list<XQueueHandle> xq_rq;
     std::list<XQueueHandle> suspend_xqs;
@@ -111,41 +114,33 @@ void StrictProcessUtilizationPartitionPolicy::RoundRobin(const Status &status)
         util_list.push_back(util);
     }
 
-    bool switched = false;
-    // calculate the timeslice for the running (first) process
-    Timeslice run_ts;
-    auto now = system_clock::now();
-    if (timeslice_end_ > now) {
-        // timeslice has not ended
-        run_ts = duration_cast<microseconds>(timeslice_end_ - now).count();
-    } else if (!compensation_started_) {
-        // timeslice has ended, but compensation has not started
-        // start compensation
-        compensation_started_ = true;
-        uint64_t overhead_us = GetOverheadUs(status, run_queue_.front());
-        compensation_end_ = timeslice_end_ + microseconds(overhead_us);
-        run_ts = duration_cast<microseconds>(compensation_end_ - now).count();
-        XDEBG("compensation started for process %d, overhead %ld us", run_queue_.front(), run_ts);
-        AddTimer(compensation_end_);
-    } else if (compensation_end_ > now) {
-        // timeslice has ended, compensation started but not ended
-        run_ts = duration_cast<microseconds>(compensation_end_ - now).count();
-    } else {
-        // timeslice and compensation have ended, switch to the next process
-        PID pid = run_queue_.front();
-        run_queue_.pop_front();
-        run_queue_.emplace_back(pid);
-        int64_t util = util_list.front();
-        util_list.pop_front();
-        util_list.push_back(util);
-        switched = true;
+    const auto now = system_clock::now();
+    const bool rotate = !head_changed && timeslice_end_ <= now && compensation_started_
+                     && compensation_end_ <= now;
+    if (rotate) {
+        run_queue_.splice(run_queue_.end(), run_queue_, run_queue_.begin());
+        util_list.splice(util_list.end(), util_list, util_list.begin());
+    }
 
-        // calculate new timeslice based on utilization and set a new timer
-        int64_t run_util = util_list.front();
-        run_ts = (int64_t)timeslice_avg_us_ * run_queue_.size() * run_util / total_util;
+    // A new head can take over immediately after the running process exits.
+    const bool switched = head_changed || rotate;
+    Timeslice run_ts;
+    if (switched) {
+        run_ts = timeslice_avg_us_ * static_cast<int64_t>(run_queue_.size())
+               * util_list.front() / total_util;
         compensation_started_ = false;
         timeslice_end_ = now + microseconds(run_ts);
         AddTimer(timeslice_end_);
+    } else if (timeslice_end_ > now) {
+        run_ts = duration_cast<microseconds>(timeslice_end_ - now).count();
+    } else {
+        if (!compensation_started_) {
+            const uint64_t overhead_us = GetOverheadUs(status, run_queue_.front());
+            compensation_end_ = timeslice_end_ + microseconds(overhead_us);
+            compensation_started_ = true;
+            AddTimer(compensation_end_);
+        }
+        run_ts = duration_cast<microseconds>(compensation_end_ - now).count();
     }
 
     // the first pid in the run_queue_ is the running process
@@ -202,7 +197,8 @@ uint64_t StrictProcessUtilizationPartitionPolicy::GetOverheadUs(const Status &st
     auto ps_it = status.process_status.find(pid);
     XASSERT(ps_it != status.process_status.end(), "process %d not found", pid);
     ProcessStatus &ps = *ps_it->second;
-    XASSERT(!ps.running_xqueues.empty(), "process %d has no running XQueues", pid);
+    // A process without running queues has no overhead to compensate.
+    if (ps.running_xqueues.empty()) return 0;
     XQueueHandle xq = *ps.running_xqueues.begin();
     auto xq_it = status.xqueue_status.find(xq);
     XASSERT(xq_it != status.xqueue_status.end(), "XQueue 0x%lx not found", xq);

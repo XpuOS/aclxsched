@@ -1,6 +1,10 @@
 #pragma once
 
 #include <memory>
+#include "xsched/ascend/hal/native.h"
+#include "xsched/ascend/shim/python.h"
+#include "xsched/ascend/hal/options.h"
+#include "xsched/ascend/hal/acl_queue.h"
 
 #include "xsched/utils/function.h"
 #include "xsched/preempt/hal/hw_queue.h"
@@ -11,13 +15,21 @@
 
 namespace xsched::ascend
 {
+void RememberOriginalAclnn(const char *name, void *address);
+void *FindOriginalAclnn(const char *name);
+void *ResolveOriginalAclnn(const char *name);
 
 #define ACL_SHIM_FUNC(name, cmd, ret_t, driver_func, ...) \
 inline ret_t X##name(FOR_EACH_PAIR_COMMA(DECLARE_PARAM, __VA_ARGS__) __VA_OPT__(,) aclrtStream stream) \
 { \
+    if (InNativeCall()) return driver_func(FOR_EACH_PAIR_COMMA(DECLARE_ARG, __VA_ARGS__)__VA_OPT__(,) stream); \
     auto xq = xsched::preempt::HwQueueManager::GetXQueue(GetHwQueueHandle(stream)); \
-    if (xq == nullptr) return driver_func(FOR_EACH_PAIR_COMMA(DECLARE_ARG, __VA_ARGS__)__VA_OPT__(,) stream); \
+    if (xq == nullptr && !GetAscendXvmmEnabled()) return driver_func(FOR_EACH_PAIR_COMMA(DECLARE_ARG, __VA_ARGS__)__VA_OPT__(,) stream); \
     auto hw_cmd = std::make_shared<cmd>(FOR_EACH_PAIR_COMMA(DECLARE_ARG, __VA_ARGS__)); \
+    if (xq == nullptr) { \
+        PythonGilRelease gil; \
+        return AclQueue::DirectLaunch(hw_cmd, stream); \
+    } \
     xq->Submit(hw_cmd); \
     static_assert(ACL_SUCCESS == 0, "ACL_SUCCESS is not 0"); \
     static_assert(OK == 0, "aclnnStatus OK is not 0"); \
@@ -25,12 +37,18 @@ inline ret_t X##name(FOR_EACH_PAIR_COMMA(DECLARE_PARAM, __VA_ARGS__) __VA_OPT__(
 }
 
 ACL_SHIM_FUNC(mdlExecuteAsync, AclModelExecuteCommand, aclError, Driver::mdlExecuteAsync, uint32_t, modelId, const aclmdlDataset *, input, aclmdlDataset *, output);
+
 ACL_SHIM_FUNC(rtMemcpyAsync, AclMemcpyCommand, aclError, Driver::rtMemcpyAsync, void *, dst, size_t, destMax, const void *, src, size_t, count, aclrtMemcpyKind, kind);
 ACL_SHIM_FUNC(rtMemsetAsync, AclMemsetCommand, aclError, Driver::rtMemsetAsync, void *, devPtr, size_t, maxCount, int32_t, value, size_t, count);
 aclError XopCompileAndExecute(const char * opType, int numInputs, aclopCompileAndExecute_arg2_t inputDesc, aclopCompileAndExecute_arg3_t inputs, int numOutputs, aclopCompileAndExecute_arg5_t outputDesc, aclopCompileAndExecute_arg6_t outputs, const aclopAttr * attr, aclopEngineType engineType, aclopCompileType compileFlag, const char * opPath , aclrtStream stream);
+aclError XopCompileAndExecuteV2(const char * opType, int numInputs, aclopCompileAndExecuteV2_arg2_t inputDesc, aclopCompileAndExecuteV2_arg3_t inputs, int numOutputs, aclopCompileAndExecuteV2_arg5_t outputDesc, aclopCompileAndExecuteV2_arg6_t outputs, aclopAttr * attr, aclopEngineType engineType, aclopCompileType compileFlag, const char * opPath , aclrtStream stream);
 
 aclError XrtRecordEvent(aclrtEvent event, aclrtStream stream);
 aclError XrtSynchronizeEvent(aclrtEvent event);
+aclError XrtDestroyEvent(aclrtEvent event);
+aclError XrtQueryEvent(aclrtEvent event, aclrtEventStatus *status);
+aclError XrtQueryEventStatus(aclrtEvent event, aclrtEventRecordedStatus *status);
+aclError XrtStreamWaitEvent(aclrtStream stream, aclrtEvent event);
 
 aclError XrtSynchronizeDevice();
 aclError XrtSynchronizeDeviceWithTimeout(int32_t timeout);
@@ -39,13 +57,101 @@ aclError XrtSynchronizeStream(aclrtStream stream);
 aclError XrtSynchronizeStreamWithTimeout(aclrtStream stream, int32_t timeout);
 aclError XrtCreateStream(aclrtStream *stream);
 aclError XrtCreateStreamWithConfig(aclrtStream *stream, uint32_t priority, uint32_t flag);
+aclError XrtDestroyStream(aclrtStream stream);
+aclError XrtDestroyStreamForce(aclrtStream stream);
+aclError XrtMemcpy(void *dst, size_t destMax, const void *src, size_t count, aclrtMemcpyKind kind);
+aclError XrtMemset(void *devPtr, size_t maxCount, int32_t value, size_t count);
+aclError XrtMalloc(void **devPtr, size_t size, aclrtMemMallocPolicy policy);
+aclError XrtMallocAlign32(void **devPtr, size_t size, aclrtMemMallocPolicy policy);
+aclError XrtMallocCached(void **devPtr, size_t size, aclrtMemMallocPolicy policy);
+aclError XrtFree(void *devPtr);
+aclError XrtGetMemInfo(aclrtMemAttr attr, size_t *free, size_t *total);
+aclError XrtResetDevice(int32_t device);
+aclError XrtResetDeviceForce(int32_t device);
+aclError XrtDestroyContext(aclrtContext context);
 
 void XopDestroyAttr(const aclopAttr *attr);
 void XDestroyTensorDesc(const aclTensorDesc *desc);
 aclError XDestroyDataBuffer(const aclDataBuffer *dataBuffer);
+aclTensor *XCreateTensor(const int64_t *viewDims, uint64_t viewDimsNum, aclDataType dataType,
+                         const int64_t *stride, int64_t offset, aclFormat format,
+                         const int64_t *storageDims, uint64_t storageDimsNum,
+                         void *tensorData);
+aclScalar *XCreateScalar(void *value, aclDataType dataType);
+aclIntArray *XCreateIntArray(const int64_t *value, uint64_t size);
+aclFloatArray *XCreateFloatArray(const float *value, uint64_t size);
+aclBoolArray *XCreateBoolArray(const bool *value, uint64_t size);
+aclTensorList *XCreateTensorList(const aclTensor *const *value, uint64_t size);
+aclScalarList *XCreateScalarList(const aclScalar *const *value, uint64_t size);
+aclnnStatus XDestroyTensor(const aclTensor *tensor);
+aclnnStatus XDestroyScalar(const aclScalar *scalar);
+aclnnStatus XDestroyIntArray(const aclIntArray *array);
+aclnnStatus XDestroyFloatArray(const aclFloatArray *array);
+aclnnStatus XDestroyBoolArray(const aclBoolArray *array);
+aclnnStatus XDestroyTensorList(const aclTensorList *tensorList);
+aclnnStatus XDestroyScalarList(const aclScalarList *scalarList);
+aclnnStatus XDestroyAclOpExecutor(aclOpExecutor *executor);
+aclnnStatus XSetAclOpExecutorRepeatable(aclOpExecutor *executor);
+void XRecordAclNNWorkspace(aclOpExecutor **executor,
+                           const void *const *resources, size_t resource_count);
+
+inline aclnnStatus XnnSubmit(const char *api_name, void *workspace, uint64_t workspaceSize,
+                             aclOpExecutor *executor, aclrtStream stream,
+                             AclNNExecuteFunc execute_fn)
+{
+    if (auto original = FindOriginalAclnn(api_name)) execute_fn = reinterpret_cast<AclNNExecuteFunc>(original);
+    // Capability probes use a null executor and expect the native error now.
+    if (InNativeCall() || executor == nullptr) {
+        auto native = reinterpret_cast<AclNNExecuteFunc>(ResolveOriginalAclnn(api_name));
+        return (native ? native : execute_fn)(workspace, workspaceSize, executor, stream);
+    }
+    PythonGilRelease gil;
+    auto aclnn_executor = AclNNExecutor::Create(executor);
+    auto xq = xsched::preempt::HwQueueManager::GetXQueue(GetHwQueueHandle(stream));
+    if (xq == nullptr && !GetAscendXvmmEnabled()) {
+        return aclnn_executor->Execute(execute_fn, workspace, workspaceSize, stream);
+    }
+
+    auto hw_cmd = std::make_shared<AclNNCommand>(
+        api_name, workspace, workspaceSize, aclnn_executor, execute_fn);
+    if (xq == nullptr) return AclQueue::DirectLaunch(hw_cmd, stream);
+    xq->Submit(hw_cmd);
+    return ACL_SUCCESS;
+}
 
 #define ACL_NN_SHIM_FUNC(name) \
-    ACL_SHIM_FUNC(nn##name, AclNN##name##Command, aclnnStatus, NnOp::nn##name, void *, workspace, uint64_t, workspaceSize, aclOpExecutor *, executor);
+inline aclnnStatus Xnn##name(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream) \
+{ return XnnSubmit("aclnn" #name, workspace, workspaceSize, executor, stream, NnOp::nn##name); }
+
+inline aclnnStatus XnnCalculateMatmulWeightSizeV2(
+    const aclIntArray *tensorShape, aclDataType dataType, uint64_t *weightTensorSize)
+{
+    return NnOp::nnCalculateMatmulWeightSizeV2(tensorShape, dataType, weightTensorSize);
+}
+
+inline aclnnStatus XnnCalculateMatmulWeightSize(
+    const aclIntArray *tensorShape, uint64_t *weightTensorSize)
+{
+    return NnOp::nnCalculateMatmulWeightSize(tensorShape, weightTensorSize);
+}
+
+inline aclnnStatus XnnCalculateConvolutionWeightSize(
+    const aclIntArray *tensorShape, bool transposed, int64_t groups,
+    aclDataType dataType, uint64_t *weightTensorSize)
+{
+    return NnOp::nnCalculateConvolutionWeightSize(
+        tensorShape, transposed, groups, dataType, weightTensorSize);
+}
+
+inline aclnnStatus XnnTransQuantParam(
+    const float *scaleArray, uint64_t scaleSize,
+    const float *offsetArray, uint64_t offsetSize,
+    uint64_t **quantParam, uint64_t *quantParamSize)
+{
+    return NnOp::nnTransQuantParam(
+        scaleArray, scaleSize, offsetArray, offsetSize,
+        quantParam, quantParamSize);
+}
 
 ACL_NN_SHIM_FUNC(Randperm);
 ACL_NN_SHIM_FUNC(NormalTensorTensor);
@@ -137,6 +243,52 @@ ACL_NN_SHIM_FUNC(InplaceXLogYTensor);
 ACL_NN_SHIM_FUNC(XLogYScalarSelf);
 ACL_NN_SHIM_FUNC(XLogYScalarOther);
 ACL_NN_SHIM_FUNC(InplaceXLogYScalarOther);
+ACL_NN_SHIM_FUNC(LayerNormBackward);
+ACL_NN_SHIM_FUNC(FmodScalar);
+ACL_NN_SHIM_FUNC(InplaceFmodScalar);
+ACL_NN_SHIM_FUNC(Lerp);
+ACL_NN_SHIM_FUNC(InplaceLerp);
+ACL_NN_SHIM_FUNC(L1Loss);
+ACL_NN_SHIM_FUNC(LogAddExp2);
+ACL_NN_SHIM_FUNC(MoeInitRoutingV2);
+ACL_NN_SHIM_FUNC(Exp2);
+ACL_NN_SHIM_FUNC(InplaceExp2);
+ACL_NN_SHIM_FUNC(Unique);
+ACL_NN_SHIM_FUNC(GroupedMatmulV2);
+ACL_NN_SHIM_FUNC(ConvertWeightToINT4Pack);
+ACL_NN_SHIM_FUNC(Cummax);
+ACL_NN_SHIM_FUNC(ForeachMinimumScalarV2);
+ACL_NN_SHIM_FUNC(ArgMax);
+ACL_NN_SHIM_FUNC(PdistForward);
+ACL_NN_SHIM_FUNC(Rsubs);
+ACL_NN_SHIM_FUNC(Rsub);
+ACL_NN_SHIM_FUNC(SwinTransformerLnQkvQuant);
+ACL_NN_SHIM_FUNC(InplaceMaskedScatter);
+ACL_NN_SHIM_FUNC(GeScalar);
+ACL_NN_SHIM_FUNC(InplaceGeScalar);
+ACL_NN_SHIM_FUNC(InplaceScatterUpdate);
+ACL_NN_SHIM_FUNC(Median);
+ACL_NN_SHIM_FUNC(MedianDim);
+ACL_NN_SHIM_FUNC(NanMedian);
+ACL_NN_SHIM_FUNC(NanMedianDim);
+ACL_NN_SHIM_FUNC(BitwiseXorTensor);
+ACL_NN_SHIM_FUNC(InplaceBitwiseXorTensor);
+ACL_NN_SHIM_FUNC(Silu);
+ACL_NN_SHIM_FUNC(SiluBackward);
+ACL_NN_SHIM_FUNC(ApplyFusedEmaAdam);
+ACL_NN_SHIM_FUNC(BitwiseOrTensor);
+ACL_NN_SHIM_FUNC(InplaceBitwiseOrTensor);
+ACL_NN_SHIM_FUNC(MaxPool2dWithMaskBackward);
+ACL_NN_SHIM_FUNC(MaxPool2dWithIndicesBackward);
+ACL_NN_SHIM_FUNC(ForeachZeroInplace);
+ACL_NN_SHIM_FUNC(ForeachMulScalar);
+ACL_NN_SHIM_FUNC(ApplyAdamWV2);
+ACL_NN_SHIM_FUNC(RoiAlign);
+ACL_NN_SHIM_FUNC(QuantMatmulAllReduceV3);
+ACL_NN_SHIM_FUNC(GridSampler2DBackward);
+ACL_NN_SHIM_FUNC(AlltoAllAllGatherBatchMatMul);
+ACL_NN_SHIM_FUNC(EqTensor);
+ACL_NN_SHIM_FUNC(InplaceEqTensor);
 ACL_NN_SHIM_FUNC(Trunc);
 ACL_NN_SHIM_FUNC(InplaceTrunc);
 ACL_NN_SHIM_FUNC(TriangularSolve);
@@ -153,11 +305,8 @@ ACL_NN_SHIM_FUNC(Sub);
 ACL_NN_SHIM_FUNC(Subs);
 ACL_NN_SHIM_FUNC(InplaceSub);
 ACL_NN_SHIM_FUNC(InplaceSubs);
-ACL_NN_SHIM_FUNC(Rsubs);
-ACL_NN_SHIM_FUNC(Rsub);
 ACL_NN_SHIM_FUNC(Frac);
 ACL_NN_SHIM_FUNC(InplaceFrac);
-ACL_SHIM_FUNC(Stft, AclStftCommand, aclnnStatus, NnOp::Stft, void *, workspace, uint64_t, workspaceSize, aclOpExecutor *, executor);
 ACL_NN_SHIM_FUNC(Square);
 ACL_NN_SHIM_FUNC(Sqrt);
 ACL_NN_SHIM_FUNC(InplaceSqrt);
@@ -186,7 +335,6 @@ ACL_NN_SHIM_FUNC(InplaceRound);
 ACL_NN_SHIM_FUNC(RoundDecimals);
 ACL_NN_SHIM_FUNC(InplaceRoundDecimals);
 ACL_NN_SHIM_FUNC(RightShift);
-ACL_SHIM_FUNC(Rfft1D, AclRfft1DCommand, aclnnStatus, NnOp::Rfft1D, void *, workspace, uint64_t, workspaceSize, aclOpExecutor *, executor);
 ACL_NN_SHIM_FUNC(VarMean);
 ACL_NN_SHIM_FUNC(Var);
 ACL_NN_SHIM_FUNC(VarCorrection);
@@ -226,9 +374,6 @@ ACL_NN_SHIM_FUNC(InplacePowTensorTensor);
 ACL_NN_SHIM_FUNC(PowTensorScalar);
 ACL_NN_SHIM_FUNC(InplacePowTensorScalar);
 ACL_NN_SHIM_FUNC(PowScalarTensor);
-ACL_NN_SHIM_FUNC(Exp2);
-ACL_NN_SHIM_FUNC(InplaceExp2);
-ACL_NN_SHIM_FUNC(PdistForward);
 ACL_NN_SHIM_FUNC(Pdist);
 ACL_NN_SHIM_FUNC(InplaceOne);
 ACL_NN_SHIM_FUNC(OneHot);
@@ -247,8 +392,6 @@ ACL_NN_SHIM_FUNC(InplaceMuls);
 ACL_NN_SHIM_FUNC(InplaceMul);
 ACL_NN_SHIM_FUNC(FmodTensor);
 ACL_NN_SHIM_FUNC(InplaceFmodTensor);
-ACL_NN_SHIM_FUNC(FmodScalar);
-ACL_NN_SHIM_FUNC(InplaceFmodScalar);
 ACL_NN_SHIM_FUNC(MinN);
 ACL_NN_SHIM_FUNC(Minimum);
 ACL_NN_SHIM_FUNC(MaxN);
@@ -261,7 +404,6 @@ ACL_NN_SHIM_FUNC(InplaceLogicalNot);
 ACL_NN_SHIM_FUNC(LogicalAnd);
 ACL_NN_SHIM_FUNC(InplaceLogicalAnd);
 ACL_NN_SHIM_FUNC(Logdet);
-ACL_NN_SHIM_FUNC(LogAddExp2);
 ACL_NN_SHIM_FUNC(LogAddExp);
 ACL_NN_SHIM_FUNC(Log1p);
 ACL_NN_SHIM_FUNC(InplaceLog1p);
@@ -283,8 +425,6 @@ ACL_NN_SHIM_FUNC(LtTensor);
 ACL_NN_SHIM_FUNC(InplaceLtTensor);
 ACL_NN_SHIM_FUNC(LtScalar);
 ACL_NN_SHIM_FUNC(InplaceLtScalar);
-ACL_NN_SHIM_FUNC(Lerp);
-ACL_NN_SHIM_FUNC(InplaceLerp);
 ACL_NN_SHIM_FUNC(Lerps);
 ACL_NN_SHIM_FUNC(InplaceLerps);
 ACL_NN_SHIM_FUNC(KlDiv);
@@ -297,8 +437,6 @@ ACL_NN_SHIM_FUNC(GroupedBiasAddGrad);
 ACL_NN_SHIM_FUNC(GroupedBiasAddGradV2);
 ACL_NN_SHIM_FUNC(GeTensor);
 ACL_NN_SHIM_FUNC(InplaceGeTensor);
-ACL_NN_SHIM_FUNC(GeScalar);
-ACL_NN_SHIM_FUNC(InplaceGeScalar);
 ACL_NN_SHIM_FUNC(GtTensor);
 ACL_NN_SHIM_FUNC(InplaceGtTensor);
 ACL_NN_SHIM_FUNC(GtScalar);
@@ -329,8 +467,6 @@ ACL_NN_SHIM_FUNC(Erf);
 ACL_NN_SHIM_FUNC(InplaceErf);
 ACL_NN_SHIM_FUNC(IsInTensorScalar);
 ACL_NN_SHIM_FUNC(IsInScalarTensor);
-ACL_NN_SHIM_FUNC(EqTensor);
-ACL_NN_SHIM_FUNC(InplaceEqTensor);
 ACL_NN_SHIM_FUNC(EqScalar);
 ACL_NN_SHIM_FUNC(InplaceEqScalar);
 ACL_NN_SHIM_FUNC(Dot);
@@ -348,7 +484,6 @@ ACL_NN_SHIM_FUNC(CumsumV2);
 ACL_NN_SHIM_FUNC(Cumprod);
 ACL_NN_SHIM_FUNC(InplaceCumprod);
 ACL_NN_SHIM_FUNC(Cummin);
-ACL_NN_SHIM_FUNC(Cummax);
 ACL_NN_SHIM_FUNC(LinalgCross);
 ACL_NN_SHIM_FUNC(Cosh);
 ACL_NN_SHIM_FUNC(InplaceCosh);
@@ -360,12 +495,8 @@ ACL_NN_SHIM_FUNC(LinalgCholesky);
 ACL_NN_SHIM_FUNC(Ceil);
 ACL_NN_SHIM_FUNC(InplaceCeil);
 ACL_NN_SHIM_FUNC(Cast);
-ACL_NN_SHIM_FUNC(BitwiseXorTensor);
-ACL_NN_SHIM_FUNC(InplaceBitwiseXorTensor);
 ACL_NN_SHIM_FUNC(BitwiseXorScalar);
 ACL_NN_SHIM_FUNC(InplaceBitwiseXorScalar);
-ACL_NN_SHIM_FUNC(BitwiseOrTensor);
-ACL_NN_SHIM_FUNC(InplaceBitwiseOrTensor);
 ACL_NN_SHIM_FUNC(BitwiseOrScalar);
 ACL_NN_SHIM_FUNC(InplaceBitwiseOrScalar);
 ACL_NN_SHIM_FUNC(BitwiseNot);
@@ -389,7 +520,6 @@ ACL_NN_SHIM_FUNC(InplaceAsin);
 ACL_NN_SHIM_FUNC(MinDim);
 ACL_NN_SHIM_FUNC(ArgMin);
 ACL_NN_SHIM_FUNC(MaxDim);
-ACL_NN_SHIM_FUNC(ArgMax);
 ACL_NN_SHIM_FUNC(AffineGrid);
 ACL_NN_SHIM_FUNC(Addr);
 ACL_NN_SHIM_FUNC(InplaceAddr);
@@ -420,7 +550,6 @@ ACL_NN_SHIM_FUNC(HansDecode);
 ACL_NN_SHIM_FUNC(AddLora);
 ACL_NN_SHIM_FUNC(RoiAlignV2Backward);
 ACL_NN_SHIM_FUNC(RoiAlignV2);
-ACL_NN_SHIM_FUNC(RoiAlign);
 ACL_NN_SHIM_FUNC(NonMaxSuppression);
 ACL_NN_SHIM_FUNC(Iou);
 ACL_NN_SHIM_FUNC(UpsampleTrilinear3dBackward);
@@ -453,7 +582,6 @@ ACL_NN_SHIM_FUNC(UpsampleNearest1d);
 ACL_NN_SHIM_FUNC(UpsampleBilinear2dBackward);
 ACL_NN_SHIM_FUNC(Resize);
 ACL_NN_SHIM_FUNC(GridSampler3DBackward);
-ACL_NN_SHIM_FUNC(GridSampler2DBackward);
 ACL_NN_SHIM_FUNC(GridSampler3D);
 ACL_NN_SHIM_FUNC(GridSampler2D);
 ACL_NN_SHIM_FUNC(Im2colBackward);
@@ -518,7 +646,6 @@ ACL_NN_SHIM_FUNC(MoeTokenPermuteGrad);
 ACL_NN_SHIM_FUNC(MoeTokenPermute);
 ACL_NN_SHIM_FUNC(MoeInitRoutingV3);
 ACL_NN_SHIM_FUNC(MoeInitRoutingV2Grad);
-ACL_NN_SHIM_FUNC(MoeInitRoutingV2);
 ACL_NN_SHIM_FUNC(MoeFusedTopk);
 ACL_NN_SHIM_FUNC(MoeFinalizeRoutingV2Grad);
 ACL_NN_SHIM_FUNC(MoeFinalizeRoutingV2);
@@ -539,7 +666,6 @@ ACL_NN_SHIM_FUNC(GroupedMatmulWeightNz);
 ACL_NN_SHIM_FUNC(GroupedMatmulV5);
 ACL_NN_SHIM_FUNC(GroupedMatmulV4);
 ACL_NN_SHIM_FUNC(GroupedMatmulV3);
-ACL_NN_SHIM_FUNC(GroupedMatmulV2);
 ACL_NN_SHIM_FUNC(GroupedMatmul);
 ACL_NN_SHIM_FUNC(FFNV3);
 ACL_NN_SHIM_FUNC(FFNV2);
@@ -584,7 +710,6 @@ ACL_NN_SHIM_FUNC(DistributeBarrier);
 ACL_NN_SHIM_FUNC(AlltoAllvGroupedMatMul);
 ACL_NN_SHIM_FUNC(AllGatherMatmulV2);
 ACL_NN_SHIM_FUNC(AllGatherMatmul);
-ACL_NN_SHIM_FUNC(SwinTransformerLnQkvQuant);
 ACL_NN_SHIM_FUNC(TransQuantParamV3);
 ACL_NN_SHIM_FUNC(TransQuantParamV2);
 // ACL_NN_SHIM_FUNC(TransQuantParam); // command without stream
@@ -604,8 +729,6 @@ ACL_NN_SHIM_FUNC(MaxPool3dWithArgmax);
 ACL_NN_SHIM_FUNC(MaxPool2dWithMask);
 ACL_NN_SHIM_FUNC(MaxPool2dWithIndices);
 ACL_NN_SHIM_FUNC(MaxPool3dWithArgmaxBackward);
-ACL_NN_SHIM_FUNC(MaxPool2dWithMaskBackward);
-ACL_NN_SHIM_FUNC(MaxPool2dWithIndicesBackward);
 ACL_NN_SHIM_FUNC(AvgPool3dBackward);
 ACL_NN_SHIM_FUNC(AvgPool2dBackward);
 ACL_NN_SHIM_FUNC(AvgPool3d);
@@ -618,7 +741,6 @@ ACL_NN_SHIM_FUNC(AdaptiveAvgPool3dBackward);
 ACL_NN_SHIM_FUNC(AdaptiveAvgPool2dBackward);
 ACL_NN_SHIM_FUNC(AdaptiveAvgPool3d);
 ACL_NN_SHIM_FUNC(AdaptiveAvgPool2d);
-ACL_NN_SHIM_FUNC(ApplyAdamWV2);
 ACL_NN_SHIM_FUNC(ApplyAdamW);
 ACL_NN_SHIM_FUNC(BatchNormGatherStatsWithCounts);
 ACL_NN_SHIM_FUNC(SyncBatchNormGatherStats);
@@ -632,7 +754,6 @@ ACL_NN_SHIM_FUNC(Norm);
 ACL_NN_SHIM_FUNC(LinalgVectorNorm);
 ACL_NN_SHIM_FUNC(LayerNorm);
 ACL_NN_SHIM_FUNC(LayerNormWithImplMode);
-ACL_NN_SHIM_FUNC(LayerNormBackward);
 ACL_NN_SHIM_FUNC(InstanceNorm);
 ACL_NN_SHIM_FUNC(GroupNormSilu);
 ACL_NN_SHIM_FUNC(GroupNormSiluV2);
@@ -675,7 +796,6 @@ ACL_NN_SHIM_FUNC(Gemm);
 ACL_NN_SHIM_FUNC(FusedMatmul);
 ACL_NN_SHIM_FUNC(FusedLinearOnlineMaxSum);
 ACL_NN_SHIM_FUNC(FusedLinearCrossEntropyLossGrad);
-ACL_NN_SHIM_FUNC(ConvertWeightToINT4Pack);
 ACL_NN_SHIM_FUNC(BatchMatmulQuant);
 ACL_NN_SHIM_FUNC(Einsum);
 ACL_NN_SHIM_FUNC(BatchMatMul);
@@ -699,7 +819,6 @@ ACL_NN_SHIM_FUNC(MultilabelMarginLoss);
 ACL_NN_SHIM_FUNC(MseLossBackward);
 ACL_NN_SHIM_FUNC(MseLossOut);
 ACL_NN_SHIM_FUNC(MseLoss);
-ACL_NN_SHIM_FUNC(L1Loss);
 ACL_NN_SHIM_FUNC(L1LossBackward);
 ACL_NN_SHIM_FUNC(KlDivBackward);
 ACL_NN_SHIM_FUNC(FusedCrossEntropyLossWithMaxSum);
@@ -722,10 +841,8 @@ ACL_NN_SHIM_FUNC(ScatterValue);
 ACL_NN_SHIM_FUNC(InplaceScatter);
 ACL_NN_SHIM_FUNC(InplaceScatterValue);
 ACL_NN_SHIM_FUNC(Unique2);
-ACL_NN_SHIM_FUNC(Unique);
 ACL_NN_SHIM_FUNC(MaxUnpool3d);
 ACL_NN_SHIM_FUNC(MaxUnpool2d);
-ACL_NN_SHIM_FUNC(InplaceScatterUpdate);
 ACL_NN_SHIM_FUNC(Flip);
 ACL_NN_SHIM_FUNC(RepeatInterleave);
 ACL_NN_SHIM_FUNC(RepeatInterleaveWithDim);
@@ -734,36 +851,78 @@ ACL_NN_SHIM_FUNC(RepeatInterleaveIntWithDim);
 ACL_NN_SHIM_FUNC(RepeatInterleaveTensor);
 ACL_NN_SHIM_FUNC(InplaceQuantScatterV2);
 ACL_NN_SHIM_FUNC(InplaceQuantScatter);
-ACL_NN_SHIM_FUNC(NonzeroV2);
+ACL_NN_SHIM_FUNC(ForeachLog);
+ACL_NN_SHIM_FUNC(ForeachDivScalarList);
+ACL_NN_SHIM_FUNC(EmbeddingDenseBackward);
+ACL_NN_SHIM_FUNC(IndexFillTensor);
+ACL_NN_SHIM_FUNC(InplaceIndexFillTensor);
+ACL_NN_SHIM_FUNC(MishBackward);
+ACL_NN_SHIM_FUNC(ThresholdBackward);
+ACL_NN_SHIM_FUNC(ForeachMinimumScalarList);
+ACL_NN_SHIM_FUNC(Hardswish);
+ACL_NN_SHIM_FUNC(InplaceHardswish);
+ACL_NN_SHIM_FUNC(ForeachMaximumScalarV2);
+ACL_NN_SHIM_FUNC(EmbeddingBag);
+ACL_NN_SHIM_FUNC(Hardshrink);
+ACL_NN_SHIM_FUNC(ForeachAddcmulList);
+ACL_NN_SHIM_FUNC(ForeachAbs);
+ACL_NN_SHIM_FUNC(Glu);
 ACL_NN_SHIM_FUNC(Nonzero);
+ACL_NN_SHIM_FUNC(PreluBackward);
+ACL_NN_SHIM_FUNC(Index);
+ACL_NN_SHIM_FUNC(ForeachTan);
+ACL_NN_SHIM_FUNC(SoftmaxBackward);
+ACL_NN_SHIM_FUNC(HardshrinkBackward);
+ACL_NN_SHIM_FUNC(Elu);
+ACL_NN_SHIM_FUNC(InplaceElu);
+ACL_NN_SHIM_FUNC(WeightQuantMatmulAllReduceAddRmsNorm);
+ACL_NN_SHIM_FUNC(ForeachAddScalar);
+ACL_NN_SHIM_FUNC(SwishBackward);
+ACL_NN_SHIM_FUNC(Shrink);
+ACL_NN_SHIM_FUNC(ForeachSubScalarV2);
+ACL_NN_SHIM_FUNC(DeepNorm);
+ACL_NN_SHIM_FUNC(ForeachAddListV2);
+ACL_NN_SHIM_FUNC(ForeachLerpScalar);
+ACL_NN_SHIM_FUNC(Kthvalue);
+ACL_NN_SHIM_FUNC(ForeachPowList);
+ACL_NN_SHIM_FUNC(GroupNormSwish);
+ACL_NN_SHIM_FUNC(ForeachCosh);
+ACL_NN_SHIM_FUNC(ForeachTanh);
+ACL_NN_SHIM_FUNC(GatherNd);
+ACL_NN_SHIM_FUNC(ForeachDivList);
+inline aclnnStatus XRfft1D(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
+{ return XnnSubmit("aclRfft1D", workspace, workspaceSize, executor, stream, NnOp::Rfft1D); }
+ACL_NN_SHIM_FUNC(Softshrink);
+ACL_NN_SHIM_FUNC(ForeachExpm1);
+ACL_NN_SHIM_FUNC(MaskedSoftmaxWithRelPosBias);
+ACL_NN_SHIM_FUNC(ForeachPowScalar);
+ACL_NN_SHIM_FUNC(ForeachSubScalarList);
+ACL_NN_SHIM_FUNC(GeluBackward);
+ACL_NN_SHIM_FUNC(NonzeroV2);
 ACL_NN_SHIM_FUNC(Inverse);
-ACL_NN_SHIM_FUNC(InplaceMaskedScatter);
+ACL_NN_SHIM_FUNC(RmsNorm);
+ACL_NN_SHIM_FUNC(AddRmsNorm);
+ACL_NN_SHIM_FUNC(ForeachSqrt);
+inline aclnnStatus XStft(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
+{ return XnnSubmit("aclStft", workspace, workspaceSize, executor, stream, NnOp::Stft); }
+ACL_NN_SHIM_FUNC(ForeachLog1p);
+ACL_NN_SHIM_FUNC(ForeachMinimumList);
+ACL_NN_SHIM_FUNC(Swish);
 ACL_NN_SHIM_FUNC(IndexAddV2);
 ACL_NN_SHIM_FUNC(IndexAdd);
 ACL_NN_SHIM_FUNC(IndexPutImpl);
-ACL_NN_SHIM_FUNC(IndexFillTensor);
-ACL_NN_SHIM_FUNC(InplaceIndexFillTensor);
 ACL_NN_SHIM_FUNC(IndexFill);
 ACL_NN_SHIM_FUNC(InplaceIndexFill);
-ACL_NN_SHIM_FUNC(Index);
 ACL_NN_SHIM_FUNC(Take);
-ACL_NN_SHIM_FUNC(Median);
-ACL_NN_SHIM_FUNC(MedianDim);
-ACL_NN_SHIM_FUNC(NanMedian);
-ACL_NN_SHIM_FUNC(NanMedianDim);
-ACL_NN_SHIM_FUNC(Kthvalue);
 ACL_NN_SHIM_FUNC(IndexSelect);
 ACL_NN_SHIM_FUNC(GatherV3);
 ACL_NN_SHIM_FUNC(GatherV2);
 ACL_NN_SHIM_FUNC(EmbeddingRenorm);
 ACL_NN_SHIM_FUNC(Embedding);
-ACL_NN_SHIM_FUNC(GatherNd);
 ACL_NN_SHIM_FUNC(Gather);
 ACL_NN_SHIM_FUNC(Topk);
 ACL_NN_SHIM_FUNC(MaxUnpool3dBackward);
 ACL_NN_SHIM_FUNC(MaxUnpool2dBackward);
-ACL_NN_SHIM_FUNC(EmbeddingDenseBackward);
-ACL_NN_SHIM_FUNC(EmbeddingBag);
 ACL_NN_SHIM_FUNC(ApplyTopKTopP);
 ACL_NN_SHIM_FUNC(ScaledMaskedSoftmax);
 ACL_NN_SHIM_FUNC(ScaledMaskedSoftmaxBackward);
@@ -771,18 +930,14 @@ ACL_NN_SHIM_FUNC(MultiScaleDeformableAttnFunction);
 ACL_NN_SHIM_FUNC(MultiScaleDeformableAttentionGrad);
 ACL_NN_SHIM_FUNC(ModulateBackward);
 ACL_NN_SHIM_FUNC(Modulate);
-ACL_NN_SHIM_FUNC(ForeachSubScalarV2);
 ACL_NN_SHIM_FUNC(ForeachSubListV2);
 ACL_NN_SHIM_FUNC(ForeachRoundOffNumberV2);
 ACL_NN_SHIM_FUNC(ForeachPowScalarV2);
 ACL_NN_SHIM_FUNC(ForeachMulScalarV2);
-ACL_NN_SHIM_FUNC(ForeachMinimumScalarV2);
-ACL_NN_SHIM_FUNC(ForeachMaximumScalarV2);
 ACL_NN_SHIM_FUNC(ForeachDivScalarV2);
 ACL_NN_SHIM_FUNC(ForeachAddcmulScalarV2);
 ACL_NN_SHIM_FUNC(ForeachAddcdivScalarV2);
 ACL_NN_SHIM_FUNC(ForeachAddScalarV2);
-ACL_NN_SHIM_FUNC(ForeachAddListV2);
 ACL_NN_SHIM_FUNC(DeformableConv2d);
 ACL_NN_SHIM_FUNC(QuantConvolution);
 ACL_NN_SHIM_FUNC(Convolution);
@@ -790,26 +945,17 @@ ACL_NN_SHIM_FUNC(ConvTbc);
 ACL_NN_SHIM_FUNC(ConvDepthwise2d);
 ACL_NN_SHIM_FUNC(ConvolutionBackward);
 ACL_NN_SHIM_FUNC(ConvTbcBackward);
-ACL_NN_SHIM_FUNC(ThresholdBackward);
 ACL_NN_SHIM_FUNC(Threshold);
 ACL_NN_SHIM_FUNC(InplaceThreshold);
-ACL_NN_SHIM_FUNC(SwishBackward);
-ACL_NN_SHIM_FUNC(Swish);
-ACL_NN_SHIM_FUNC(Silu);
 ACL_NN_SHIM_FUNC(SoftshrinkBackward);
-ACL_NN_SHIM_FUNC(Softshrink);
 ACL_NN_SHIM_FUNC(SoftplusBackward);
 ACL_NN_SHIM_FUNC(Softplus);
 ACL_NN_SHIM_FUNC(Softmax);
-ACL_NN_SHIM_FUNC(SoftmaxBackward);
 ACL_NN_SHIM_FUNC(SoftmaxCrossEntropyWithLogits);
-ACL_NN_SHIM_FUNC(SiluBackward);
 ACL_NN_SHIM_FUNC(SigmoidBackward);
 ACL_NN_SHIM_FUNC(Sigmoid);
 ACL_NN_SHIM_FUNC(InplaceSigmoid);
 ACL_NN_SHIM_FUNC(GluBackward);
-ACL_NN_SHIM_FUNC(Glu);
-ACL_NN_SHIM_FUNC(Shrink);
 ACL_NN_SHIM_FUNC(SeluBackward);
 ACL_NN_SHIM_FUNC(Selu);
 ACL_NN_SHIM_FUNC(InplaceSelu);
@@ -817,9 +963,7 @@ ACL_NN_SHIM_FUNC(Relu);
 ACL_NN_SHIM_FUNC(InplaceRelu);
 ACL_NN_SHIM_FUNC(AddRelu);
 ACL_NN_SHIM_FUNC(InplaceAddRelu);
-ACL_NN_SHIM_FUNC(PreluBackward);
 ACL_NN_SHIM_FUNC(Prelu);
-ACL_NN_SHIM_FUNC(MishBackward);
 ACL_NN_SHIM_FUNC(Mish);
 ACL_NN_SHIM_FUNC(InplaceMish);
 ACL_NN_SHIM_FUNC(LogSoftmax);
@@ -837,17 +981,12 @@ ACL_NN_SHIM_FUNC(Heaviside);
 ACL_NN_SHIM_FUNC(HardtanhBackward);
 ACL_NN_SHIM_FUNC(HardswishBackwardV2);
 ACL_NN_SHIM_FUNC(HardswishBackward);
-ACL_NN_SHIM_FUNC(Hardswish);
-ACL_NN_SHIM_FUNC(InplaceHardswish);
 ACL_NN_SHIM_FUNC(HardsigmoidBackward);
 ACL_NN_SHIM_FUNC(Hardsigmoid);
 ACL_NN_SHIM_FUNC(InplaceHardsigmoid);
-ACL_NN_SHIM_FUNC(HardshrinkBackward);
-ACL_NN_SHIM_FUNC(Hardshrink);
 ACL_NN_SHIM_FUNC(GeluV2);
 ACL_NN_SHIM_FUNC(GeluQuant);
 ACL_NN_SHIM_FUNC(GeluBackwardV2);
-ACL_NN_SHIM_FUNC(GeluBackward);
 ACL_NN_SHIM_FUNC(Gelu);
 ACL_NN_SHIM_FUNC(GeGlu);
 ACL_NN_SHIM_FUNC(GeGluV3);
@@ -858,8 +997,6 @@ ACL_NN_SHIM_FUNC(FastGelu);
 ACL_NN_SHIM_FUNC(Erfinv);
 ACL_NN_SHIM_FUNC(InplaceErfinv);
 ACL_NN_SHIM_FUNC(EluBackward);
-ACL_NN_SHIM_FUNC(Elu);
-ACL_NN_SHIM_FUNC(InplaceElu);
 ACL_NN_SHIM_FUNC(Celu);
 ACL_NN_SHIM_FUNC(InplaceCelu);
 ACL_NN_SHIM_FUNC(SilentCheckV2);
@@ -874,21 +1011,15 @@ ACL_NN_SHIM_FUNC(DynamicBlockQuant);
 ACL_NN_SHIM_FUNC(DequantSwigluQuantV2);
 ACL_NN_SHIM_FUNC(DequantSwigluQuant);
 ACL_NN_SHIM_FUNC(DequantBias);
-ACL_NN_SHIM_FUNC(ApplyFusedEmaAdam);
 ACL_NN_SHIM_FUNC(ApplyAdamWQuant);
 ACL_NN_SHIM_FUNC(AdvanceStepV2);
 ACL_NN_SHIM_FUNC(AdvanceStep);
 ACL_NN_SHIM_FUNC(RmsNormGrad);
-ACL_NN_SHIM_FUNC(RmsNorm);
-ACL_NN_SHIM_FUNC(MaskedSoftmaxWithRelPosBias);
 ACL_NN_SHIM_FUNC(InplaceAddRmsNorm);
 ACL_NN_SHIM_FUNC(GroupNormSwishGrad);
-ACL_NN_SHIM_FUNC(GroupNormSwish);
 ACL_NN_SHIM_FUNC(GemmaRmsNorm);
 ACL_NN_SHIM_FUNC(DeepNormGrad);
-ACL_NN_SHIM_FUNC(DeepNorm);
 ACL_NN_SHIM_FUNC(AddRmsNormCast);
-ACL_NN_SHIM_FUNC(AddRmsNorm);
 ACL_NN_SHIM_FUNC(AddLayerNormGrad);
 ACL_NN_SHIM_FUNC(AddLayerNorm);
 ACL_NN_SHIM_FUNC(LogitGrad);
@@ -898,13 +1029,8 @@ ACL_NN_SHIM_FUNC(CrossEntropyLoss);
 ACL_NN_SHIM_FUNC(TopKTopPSample);
 ACL_NN_SHIM_FUNC(RepeatInterleaveGrad);
 ACL_NN_SHIM_FUNC(ExpandIntoJaggedPermute);
-ACL_NN_SHIM_FUNC(ForeachZeroInplace);
-ACL_NN_SHIM_FUNC(ForeachTanh);
-ACL_NN_SHIM_FUNC(ForeachTan);
-ACL_NN_SHIM_FUNC(ForeachSubScalarList);
 ACL_NN_SHIM_FUNC(ForeachSubScalar);
 ACL_NN_SHIM_FUNC(ForeachSubList);
-ACL_NN_SHIM_FUNC(ForeachSqrt);
 ACL_NN_SHIM_FUNC(ForeachSinh);
 ACL_NN_SHIM_FUNC(ForeachSin);
 ACL_NN_SHIM_FUNC(ForeachSign);
@@ -913,49 +1039,34 @@ ACL_NN_SHIM_FUNC(ForeachRoundOffNumber);
 ACL_NN_SHIM_FUNC(ForeachReciprocal);
 ACL_NN_SHIM_FUNC(ForeachPowScalarList);
 ACL_NN_SHIM_FUNC(ForeachPowScalarAndTensor);
-ACL_NN_SHIM_FUNC(ForeachPowScalar);
-ACL_NN_SHIM_FUNC(ForeachPowList);
 ACL_NN_SHIM_FUNC(ForeachNorm);
 ACL_NN_SHIM_FUNC(ForeachNonFiniteCheckAndUnscale);
 ACL_NN_SHIM_FUNC(ForeachNeg);
 ACL_NN_SHIM_FUNC(ForeachMulScalarList);
-ACL_NN_SHIM_FUNC(ForeachMulScalar);
 ACL_NN_SHIM_FUNC(ForeachMulList);
-ACL_NN_SHIM_FUNC(ForeachMinimumScalarList);
 ACL_NN_SHIM_FUNC(ForeachMinimumScalar);
-ACL_NN_SHIM_FUNC(ForeachMinimumList);
 ACL_NN_SHIM_FUNC(ForeachMaximumScalarList);
 ACL_NN_SHIM_FUNC(ForeachMaximumScalar);
 ACL_NN_SHIM_FUNC(ForeachMaximumList);
 ACL_NN_SHIM_FUNC(ForeachLog2);
-ACL_NN_SHIM_FUNC(ForeachLog1p);
 ACL_NN_SHIM_FUNC(ForeachLog10);
-ACL_NN_SHIM_FUNC(ForeachLog);
-ACL_NN_SHIM_FUNC(ForeachLerpScalar);
 ACL_NN_SHIM_FUNC(ForeachLerpList);
-ACL_NN_SHIM_FUNC(ForeachExpm1);
 ACL_NN_SHIM_FUNC(ForeachExp);
 ACL_NN_SHIM_FUNC(ForeachErfc);
 ACL_NN_SHIM_FUNC(ForeachErf);
-ACL_NN_SHIM_FUNC(ForeachDivScalarList);
 ACL_NN_SHIM_FUNC(ForeachDivScalar);
-ACL_NN_SHIM_FUNC(ForeachDivList);
-ACL_NN_SHIM_FUNC(ForeachCosh);
 ACL_NN_SHIM_FUNC(ForeachCos);
 ACL_NN_SHIM_FUNC(ForeachCopy);
 ACL_NN_SHIM_FUNC(ForeachAtan);
 ACL_NN_SHIM_FUNC(ForeachAsin);
 ACL_NN_SHIM_FUNC(ForeachAddcmulScalarList);
 ACL_NN_SHIM_FUNC(ForeachAddcmulScalar);
-ACL_NN_SHIM_FUNC(ForeachAddcmulList);
 ACL_NN_SHIM_FUNC(ForeachAddcdivScalarList);
 ACL_NN_SHIM_FUNC(ForeachAddcdivScalar);
 ACL_NN_SHIM_FUNC(ForeachAddcdivList);
 ACL_NN_SHIM_FUNC(ForeachAddScalarList);
-ACL_NN_SHIM_FUNC(ForeachAddScalar);
 ACL_NN_SHIM_FUNC(ForeachAddList);
 ACL_NN_SHIM_FUNC(ForeachAcos);
-ACL_NN_SHIM_FUNC(ForeachAbs);
 ACL_NN_SHIM_FUNC(SwiGluGrad);
 ACL_NN_SHIM_FUNC(SwiGlu);
 ACL_NN_SHIM_FUNC(SquaredRelu);
@@ -965,20 +1076,18 @@ ACL_NN_SHIM_FUNC(ClippedSwiglu);
 ACL_NN_SHIM_FUNC(MoeDistributeCombineV3);
 ACL_NN_SHIM_FUNC(InplaceWeightQuantMatmulAllReduceAddRmsNorm);
 ACL_NN_SHIM_FUNC(BatchMatMulReduceScatterAlltoAll);
-ACL_NN_SHIM_FUNC(QuantMatmulAllReduceV3);
 ACL_NN_SHIM_FUNC(MoeDistributeDispatchV3);
 ACL_NN_SHIM_FUNC(QuantMatmulAllReduceAddRmsNorm);
 ACL_NN_SHIM_FUNC(InplaceQuantMatmulAllReduceAddRmsNorm);
-ACL_NN_SHIM_FUNC(WeightQuantMatmulAllReduceAddRmsNorm);
 ACL_NN_SHIM_FUNC(DistributeBarrierV2);
 ACL_NN_SHIM_FUNC(MoeDistributeDispatchV2);
 ACL_NN_SHIM_FUNC(MoeDistributeCombineV2);
 ACL_NN_SHIM_FUNC(QuantMatmulAllReduceV2);
 ACL_NN_SHIM_FUNC(MoeDistributeDispatchV4);
-ACL_NN_SHIM_FUNC(AlltoAllAllGatherBatchMatMul);
 ACL_NN_SHIM_FUNC(WeightQuantMatmulAllReduce);
 ACL_NN_SHIM_FUNC(MatmulAllReduceV2);
 ACL_NN_SHIM_FUNC(MoeDistributeCombineV4);
 ACL_NN_SHIM_FUNC(QuantMatmulAllReduce);
+
 
 } // namespace xsched::ascend

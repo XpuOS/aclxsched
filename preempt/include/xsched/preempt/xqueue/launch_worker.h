@@ -81,6 +81,8 @@ private:
 
     void WorkerLoop();
     void LaunchHwCommand(std::shared_ptr<HwCommand> hw_cmd);
+    void LaunchHwBatch(CommandLog batch);
+    void CompleteCommandsThrough(int64_t command_idx);
 
     std::unique_lock<utils::MutexLock> SyncAllWithLock(std::unique_lock<utils::MutexLock> lock);
     std::unique_lock<utils::MutexLock> SyncCmdWithLock(std::unique_lock<utils::MutexLock> lock,

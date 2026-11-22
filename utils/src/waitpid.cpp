@@ -61,7 +61,7 @@ void PidFdWaiter::Start()
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
-    ev.data.u64 = PackEventData(kEpollEventTerminate, 0);
+    ev.data.u64 = 0;
     XASSERT(!epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, event_fd_, &ev),
             "fail to add event fd to epoll");
 
@@ -78,42 +78,39 @@ void PidFdWaiter::Stop()
 
     if (event_fd_ >= 0) close(event_fd_);
     if (epoll_fd_ >= 0) close(epoll_fd_);
-    for (auto& it : pid_fds_) { close(it.second); }
+    for (const auto &entry : watches_) close(entry.second.fd);
     
     event_fd_ = -1;
     epoll_fd_ = -1;
-    pid_fds_.clear();
+    watches_.clear();
 }
 
-void PidFdWaiter::AddWait(PID pid)
+void PidFdWaiter::AddWait(PID pid, uint32_t generation)
 {
-    int pid_fd = OpenPidFd(pid, 0);
-    if (pid_fd < 0) {
-        // check if the process is already terminated
-        if (errno == ESRCH) {
-            XDEBG("process %d is already terminated", pid);
-            callback_(pid);
-            return;
+    XASSERT(pid > 0 && generation != 0, "invalid pidfd watch");
+    const int pid_fd = OpenPidFd(pid, 0);
+    if (pid_fd < 0 && errno != ESRCH) XERRO("fail to open pid fd for pid %d", pid);
+
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (pid_fd >= 0) {
+            struct epoll_event ev{};
+            ev.events = EPOLLIN;
+            // Zero is reserved for the event that stops the worker.
+            ev.data.u64 = (static_cast<uint64_t>(generation) << 32) | static_cast<uint32_t>(pid);
+            XASSERT(epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, pid_fd, &ev) == 0,
+                    "fail to add pid fd to epoll for pid %d", pid);
         }
-        XERRO("fail to open pid fd for pid %d", pid);
+
+        auto previous = watches_.find(pid);
+        if (previous != watches_.end()) {
+            RemovePidFd(previous->second.fd);
+            watches_.erase(previous);
+        }
+        if (pid_fd >= 0) watches_.emplace(pid, Watch{pid_fd, generation});
     }
 
-    mtx_.lock();
-    pid_fds_[pid] = pid_fd;
-    mtx_.unlock();
-
-    // According to the notes of linux man page of epoll_wait at
-    // https://www.man7.org/linux/man-pages/man2/epoll_wait.2.html
-    // "While one thread is blocked in a call to epoll_wait(), it is
-    // possible for another thread to add a file descriptor to the
-    // waited-upon epoll instance. If the new file descriptor becomes
-    // ready, it will cause the epoll_wait() call to unblock."
-    // So we can safely add the pid fd to epoll.
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.u64 = PackEventData(kEpollEventPid, pid);
-    XASSERT(!epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, pid_fd, &ev),
-            "fail to add pid fd to epoll");
+    if (pid_fd < 0) callback_(pid, generation);
 }
 
 void PidFdWaiter::WaitWorker()
@@ -122,47 +119,34 @@ void PidFdWaiter::WaitWorker()
     while (true) {
         if (epoll_wait(epoll_fd_, &ev, 1, -1) == -1) {
             XASSERT(errno == EINTR, "fail during epoll wait");
-			continue;
-		}
+            continue;
+        }
 
-        if (GetEventType(ev.data.u64) == kEpollEventTerminate) {
+        if (ev.data.u64 == 0) {
             eventfd_t v;
             XASSERT(!eventfd_read(event_fd_, &v), "fail to read event fd");
             return;
         }
 
-        XASSERT(GetEventType(ev.data.u64) == kEpollEventPid,
-                "invalid event type: %d", GetEventType(ev.data.u64));
-
-        PID pid = GetEventPid(ev.data.u64);
-        
-        mtx_.lock();
-        auto it = pid_fds_.find(pid);
-        XASSERT(it != pid_fds_.end(), "pid fd not found");
-        int pid_fd = it->second;
-        pid_fds_.erase(it);
-        mtx_.unlock();
-
-        XASSERT(!epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, pid_fd, nullptr),
-                "fail to remove pid fd from epoll");
-        XASSERT(!close(pid_fd), "fail to close pid fd");
-        callback_(pid);
+        const auto pid = static_cast<PID>(static_cast<uint32_t>(ev.data.u64));
+        const auto generation = static_cast<uint32_t>(ev.data.u64 >> 32);
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            auto it = watches_.find(pid);
+            if (it == watches_.end() || it->second.generation != generation) continue;
+            RemovePidFd(it->second.fd);
+            watches_.erase(it);
+        }
+        callback_(pid, generation);
     }
 }
 
-PID PidFdWaiter::GetEventPid(uint64_t data)
+void PidFdWaiter::RemovePidFd(int fd)
 {
-    return PID(data & 0xFFFFFFFF);
-}
-
-EpollEventType PidFdWaiter::GetEventType(uint64_t data)
-{
-    return EpollEventType(data >> 32);
-}
-
-uint64_t PidFdWaiter::PackEventData(EpollEventType type, PID pid)
-{
-    return ((uint64_t)type << 32) | (uint64_t)pid;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) != 0 && errno != ENOENT) {
+        XWARN("fail to remove pid fd %d from epoll, errno: %d", fd, errno);
+    }
+    if (close(fd) != 0) XWARN("fail to close pid fd %d, errno: %d", fd, errno);
 }
 
 int PidFdWaiter::OpenPidFd(PID pid, unsigned int flags)
@@ -188,33 +172,35 @@ void ScanPidWaiter::Stop()
     thread_ = nullptr;
 }
 
-void ScanPidWaiter::AddWait(PID pid)
+void ScanPidWaiter::AddWait(PID pid, uint32_t generation)
 {
     std::lock_guard<std::mutex> lock(mtx_);
-    pids_.insert(pid);
+    pids_[pid] = generation;
 }
 
 void ScanPidWaiter::WaitWorker()
 {
     while (running_.load()) {
-        mtx_.lock();
-        std::unordered_set<PID> set = pids_;
-        mtx_.unlock();
+        std::unordered_map<PID, uint32_t> current_pids;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            current_pids = pids_;
+        }
 
-        std::list<PID> terminated;
-        for (auto pid : set) {
+        for (const auto &[pid, generation] : current_pids) {
             if (kill(pid, 0) == 0) continue;
             if (errno != ESRCH) {
                 XWARN("fail to test process %d, errno: %d", pid, errno);
                 continue;
             }
-            terminated.emplace_back(pid);
-            callback_(pid);
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                auto it = pids_.find(pid);
+                if (it == pids_.end() || it->second != generation) continue;
+                pids_.erase(it);
+            }
+            callback_(pid, generation);
         }
-
-        mtx_.lock();
-        for (auto pid : terminated) pids_.erase(pid);
-        mtx_.unlock();
 
         std::this_thread::sleep_for(std::chrono::microseconds(SCAN_INTERVAL_US));
     }
@@ -241,21 +227,22 @@ void INotifyPidWaiter::Stop()
     thread_ = nullptr;
 }
 
-void INotifyPidWaiter::AddWait(PID pid)
+void INotifyPidWaiter::AddWait(PID pid, uint32_t generation)
 {
     std::string proc_path = "/proc/" + std::to_string(pid);
-    std::lock_guard<std::mutex> lock(mtx_);
+    std::unique_lock<std::mutex> lock(mtx_);
     int wd = inotify_add_watch(inotify_fd_, proc_path.c_str(), IN_DELETE_SELF);
     if (wd < 0) {
         // check if the process is already terminated
         if (errno == ENOENT) {
             XDEBG("process %d is already terminated", pid);
-            callback_(pid);
+            lock.unlock();
+            callback_(pid, generation);
             return;
         }
         XERRO("fail to add watch for pid %d", pid);
     }
-    watch_pids_[wd] = pid;
+    watches_[wd] = {pid, generation};
 }
 
 void INotifyPidWaiter::WaitWorker()
@@ -272,17 +259,17 @@ void INotifyPidWaiter::WaitWorker()
         ssize_t i = 0;
         while (i < n) {
             struct inotify_event *event = (struct inotify_event *) &buf[i];
-            if (event->mask & IN_DELETE_SELF) {
-                mtx_.lock();
-                auto it = watch_pids_.find(event->wd);
-                XASSERT(it != watch_pids_.end(), "watch fd not found");
-                PID pid = it->second;
-                watch_pids_.erase(it);
-                mtx_.unlock();
-                callback_(pid);
-                inotify_rm_watch(inotify_fd_, event->wd);
-            }
             i += sizeof(struct inotify_event) + event->len;
+            if (event->mask & IN_DELETE_SELF) {
+                std::unique_lock<std::mutex> lock(mtx_);
+                auto it = watches_.find(event->wd);
+                if (it == watches_.end()) continue;
+                const auto [pid, generation] = it->second;
+                watches_.erase(it);
+                inotify_rm_watch(inotify_fd_, event->wd);
+                lock.unlock();
+                callback_(pid, generation);
+            }
         }
     }
 }
@@ -309,52 +296,44 @@ void WinPidWaiter::Stop()
     thread_ = nullptr;
 }
 
-void WinPidWaiter::AddWait(PID pid)
+void WinPidWaiter::AddWait(PID pid, uint32_t generation)
 {
     std::lock_guard<std::mutex> lock(mtx_);
-    pids_.insert(pid);
+    pids_[pid] = generation;
 }
 
 void WinPidWaiter::WaitWorker()
 {
     while (running_.load()) {
-        std::unordered_set<PID> current_pids;
+        std::unordered_map<PID, uint32_t> current_pids;
         {
             std::lock_guard<std::mutex> lock(mtx_);
             current_pids = pids_;
         }
 
-        std::list<PID> terminated;
-        for (auto pid : current_pids) {
-            HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-            if (hProcess == NULL) {
-                DWORD err = GetLastError();
-                if (err == ERROR_INVALID_PARAMETER) {
-                    terminated.push_back(pid);
-                    callback_(pid);
-                } else {
-                    XWARN("fail to open process " FMT_PID ", error: %lu", pid, err);
-                }
-                continue;
-            }
-            
-            DWORD exitCode;
-            if (GetExitCodeProcess(hProcess, &exitCode)) {
-                if (exitCode != STILL_ACTIVE) {
-                    terminated.push_back(pid);
-                    callback_(pid);
+        for (const auto &[pid, generation] : current_pids) {
+            HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if (process == NULL) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_INVALID_PARAMETER) {
+                    XWARN("fail to open process " FMT_PID ", error: %lu", pid, error);
+                    continue;
                 }
             } else {
-                XWARN("fail to get exit code for process " FMT_PID, pid);
+                DWORD exit_code;
+                const bool exited = GetExitCodeProcess(process, &exit_code)
+                                  && exit_code != STILL_ACTIVE;
+                CloseHandle(process);
+                if (!exited) continue;
             }
-            CloseHandle(hProcess);
-        }
 
-        if (!terminated.empty()) {
-            std::lock_guard<std::mutex> lock(mtx_);
-            for (auto pid : terminated) {
-                pids_.erase(pid);
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                auto it = pids_.find(pid);
+                if (it == pids_.end() || it->second != generation) continue;
+                pids_.erase(it);
             }
+            callback_(pid, generation);
         }
 
         std::this_thread::sleep_for(std::chrono::microseconds(SCAN_INTERVAL_US));

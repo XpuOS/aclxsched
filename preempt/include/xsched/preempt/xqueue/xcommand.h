@@ -46,6 +46,11 @@ enum XCommandProperty
     /// it is actually launched to the XPU.
     kCommandPropertyBlockingSubmit = 0x0004,
 
+    /// @brief The caller is expected to submit a continuation after this
+    /// host-dispatch boundary. Briefly wait for it before automatic idle sync.
+    /// Explicit synchronization and suspension are unaffected.
+    kCommandPropertyDispatchContinuation = 0x0008,
+
     kCommandPropertyMaskAll        = -1,
 };
 

@@ -28,6 +28,12 @@ public:
     /// NOTE: This function will be called while holding the launch worker lock, so it should
     /// NOT do any blocking operations like synchronizing another HwQueue or HwCommand.
     virtual void Launch(std::shared_ptr<HwCommand> hw_cmd) = 0;
+    /// Prepare memory references for a complete batch and retain them until
+    /// its tail completes. The worker bounds the number of in-flight commands.
+    virtual bool UsesBatchMemory() const { return false; }
+    virtual std::shared_ptr<void> PrepareBatch(const CommandLog &) { return {}; }
+    virtual void LaunchPrepared(std::shared_ptr<HwCommand> command, std::shared_ptr<void> lease)
+    { UNUSED(lease); Launch(command); }
 
     /// @brief Level-1 (kPreemptLevelBlock) interface. Synchronize with the hardware to wait until
     /// ALL HwCommands launched on this HwQueue are finished. Can ALSO return after the HwCommands

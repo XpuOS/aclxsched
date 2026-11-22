@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <vector>
 #include <mutex>
 #include <memory>
 
@@ -44,6 +45,8 @@ public:
     void UpdateMemoryInfo(uint64_t operation_id);
     void OnContextTypeChange(XMemoryContextType type);
 
+    // Each returned range is clipped to a single allocation.
+    std::vector<std::pair<void *, size_t>> Intersect(const utils::Region &region);
     size_t GetTotalAllocatedSize();
     size_t GetAllocatedSize(void *ptr);
     std::shared_ptr<utils::Region> GetAllocatedMemory();

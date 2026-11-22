@@ -1,6 +1,9 @@
 #include "xsched/utils/xassert.h"
 #include "xsched/preempt/sched/agent.h"
 #include "xsched/preempt/xqueue/command_buffer.h"
+#include "xsched/preempt/hal/hw_command.h"
+
+#include <chrono>
 
 using namespace xsched::sched;
 using namespace xsched::preempt;
@@ -39,6 +42,13 @@ void CommandBuffer::ForEachCommand(std::function<bool (std::shared_ptr<XCommand>
 std::shared_ptr<XCommand> CommandBuffer::Dequeue()
 {
     std::unique_lock<std::mutex> lock(mtx_);
+
+    // A synchronous host API often resumes its producer just after its launch
+    // completes. Do not interpret that short handoff as application idleness.
+    // Enqueue (including explicit WaitAll) wakes this wait immediately.
+    if (cmds_.empty() && last_enqueued_cmd_->GetProps(kCommandPropertyDispatchContinuation)) {
+        cv_.wait_for(lock, std::chrono::microseconds(50), [&] { return !cmds_.empty(); });
+    }
 
     if (!cmds_.empty()) {
         auto xcmd = cmds_.front();
@@ -94,6 +104,21 @@ std::shared_ptr<XCommand> CommandBuffer::Dequeue()
 
     XASSERT(false, "should not reach here");
     return nullptr;
+}
+
+std::vector<std::shared_ptr<HwCommand>> CommandBuffer::TakeHardwareCommands(size_t limit)
+{
+    std::vector<std::shared_ptr<HwCommand>> batch;
+    std::lock_guard<std::mutex> lock(mtx_);
+    while (batch.size() < limit && !cmds_.empty()) {
+        auto command = std::dynamic_pointer_cast<HwCommand>(cmds_.front());
+        if (!command || std::dynamic_pointer_cast<HwCallbackCommand>(command)) break;
+        cmds_.pop_front();
+        last_dequeued_cmd_ = command;
+        batch.push_back(command);
+        if (command->Synchronizable() || command->GetProps(kCommandPropertyBlockingSubmit)) break;
+    }
+    return batch;
 }
 
 void CommandBuffer::Enqueue(std::shared_ptr<XCommand> xcmd)

@@ -1,5 +1,10 @@
 #include <mutex>
 
+#if defined(__linux__)
+#include <cerrno>
+#include <sys/msg.h>
+#endif
+
 #include "server.h"
 #include "convert.h"
 #include "xsched/utils/log.h"
@@ -46,15 +51,16 @@ Server::~Server()
 
 void Server::Run()
 {
-    ipc::ChannelKey server_chn_key = (ipc::ChannelKey)XSCHED_SERVER_CHANNEL_KEY;
+    const auto server_chn_key = static_cast<ipc::ChannelKey>(XSCHED_SERVER_CHANNEL_KEY);
     recv_chan_ = std::make_unique<ipc::Node>(server_chn_key, ipc::NodeType::kReceiver);
     self_chan_ = std::make_unique<ipc::Node>(server_chn_key, ipc::NodeType::kSender);
 
     scheduler_->SetExecutor(std::bind(&Server::Execute, this, std::placeholders::_1));
     scheduler_->Run();
 
-    pid_waiter_ = PidWaiter::Create(
-                  std::bind(&Server::ProcessTerminate, this, std::placeholders::_1));
+    pid_waiter_ = PidWaiter::Create([this](PID pid, uint32_t generation) {
+        ProcessTerminate(pid, generation);
+    });
     pid_waiter_->Start();
 
     http_thread_ = std::make_unique<std::thread>([this]() {
@@ -85,8 +91,10 @@ void Server::Stop()
         recv_chan_->Remove();
     }
 
-    for (auto &it : client_chans_) it.second->Remove();
-    client_chans_.clear();
+    for (auto &[pid, client] : clients_) {
+        if (client.channel) client.channel->Remove();
+    }
+    clients_.clear();
 }
 
 void Server::RecvWorker()
@@ -109,38 +117,48 @@ void Server::RecvWorker()
             scheduler_->Stop();
             recv_chan_->Remove();
             self_chan_->Remove();
-            for (auto &it : client_chans_) it.second->Remove();
+            for (auto &[pid, client] : clients_) {
+                if (client.channel) client.channel->Remove();
+            }
 
             scheduler_ = nullptr;
             recv_chan_ = nullptr;
             self_chan_ = nullptr;
-            client_chans_.clear();
+            clients_.clear();
             return;
         case kEventProcessCreate:
         {
-            PID client_pid = e->Pid();
-
-            // ensure no duplicate client process
-            auto destroy_event = std::make_shared<ProcessDestroyEvent>(client_pid);
-            scheduler_->RecvEvent(destroy_event);
-            this->CleanUpProcess(client_pid);
-
+            const PID client_pid = e->Pid();
             auto process_create_event = std::dynamic_pointer_cast<const ProcessCreateEvent>(e);
             XASSERT(process_create_event != nullptr, "event type not match");
-            ipc::ChannelKey client_chn_key = (ipc::ChannelKey)client_pid;
-            auto client_chan = std::make_shared<ipc::Node>(client_chn_key, ipc::NodeType::kSender);
-            XINFO("client process " FMT_PID " connected, cmdline: %s",
-                  client_pid, process_create_event->Cmdline());
+            const uint32_t generation = ++client_generation_;
+            XASSERT(generation != 0, "client registration generation exhausted");
+            const auto client_key = static_cast<ipc::ChannelKey>(client_pid);
+            ClientProcess client{
+                std::make_shared<ipc::Node>(client_key, ipc::NodeType::kSender), generation,
+            };
+#if defined(__linux__)
+            // A reused PID can create its new queue before the server sees its registration.
+            client.message_queue_id = msgget(static_cast<key_t>(client_key), 0);
+#endif
 
-            chan_mtx_.lock();
-            client_chans_[client_pid] = client_chan;
-            chan_mtx_.unlock();
-            pid_waiter_->AddWait(client_pid);
-            scheduler_->RecvEvent(e);
+            {
+                std::lock_guard<std::mutex> lock(chan_mtx_);
+                // Serialize the scheduler events with pidfd callbacks for this PID.
+                scheduler_->RecvEvent(std::make_shared<ProcessDestroyEvent>(client_pid));
+                CleanUpProcess(client_pid);
+                clients_.insert_or_assign(client_pid, std::move(client));
+                XINFO("client process " FMT_PID " connected, cmdline: %s",
+                      client_pid, process_create_event->Cmdline());
+                scheduler_->RecvEvent(e);
+            }
+            // AddWait can report an already exited process synchronously.
+            pid_waiter_->AddWait(client_pid, generation);
             break;
         }
         case kEventProcessDestroy:
         {
+            std::lock_guard<std::mutex> lock(chan_mtx_);
             scheduler_->RecvEvent(e);
             this->CleanUpProcess(e->Pid());
             break;
@@ -154,23 +172,32 @@ void Server::RecvWorker()
 
 void Server::CleanUpProcess(PID pid)
 {
-    {
-        std::lock_guard<std::mutex> lock(chan_mtx_);
-        auto it = client_chans_.find(pid);
-        if (it == client_chans_.end()) return;
-        // Could cause Execute() cannot find the channel,
-        // because scheduler_->RecvEvent(e) is asynchronous.
-        client_chans_.erase(it);
-    }
+    auto it = clients_.find(pid);
+    if (it == clients_.end() || !it->second.channel) return;
+    it->second.channel.reset();
     XINFO("client process " FMT_PID " closed", pid);
 }
 
-void Server::ProcessTerminate(PID pid)
+void Server::ProcessTerminate(PID pid, uint32_t generation)
 {
-    auto e = std::make_shared<ProcessDestroyEvent>(pid);
-    scheduler_->RecvEvent(e);
-    this->CleanUpProcess(pid);
-    ipc::Channel::Remove((ipc::ChannelKey)pid);
+    std::lock_guard<std::mutex> lock(chan_mtx_);
+    auto it = clients_.find(pid);
+    if (it == clients_.end() || it->second.generation != generation) return;
+
+    if (it->second.channel) {
+        scheduler_->RecvEvent(std::make_shared<ProcessDestroyEvent>(pid));
+        CleanUpProcess(pid);
+    }
+#if defined(__linux__)
+    const int queue_id = it->second.message_queue_id;
+    if (queue_id >= 0 && msgctl(queue_id, IPC_RMID, nullptr) != 0
+        && errno != EINVAL && errno != EIDRM) {
+        XWARN("fail to remove message queue for pid " FMT_PID ", errno: %d", pid, errno);
+    }
+#else
+    ipc::Channel::Remove(static_cast<ipc::ChannelKey>(pid));
+#endif
+    clients_.erase(it);
 }
 
 void Server::SendHint(std::shared_ptr<const sched::Hint> hint)
@@ -184,9 +211,9 @@ void Server::Execute(std::shared_ptr<const Operation> operation)
     PID client_pid = operation->Pid();
 
     chan_mtx_.lock();
-    auto it = client_chans_.find(client_pid);
+    auto it = clients_.find(client_pid);
 
-    if (it == client_chans_.end()) {
+    if (it == clients_.end() || !it->second.channel) {
         chan_mtx_.unlock();
         // It is possible that the server has received ProcessDestroyEvent in RecvWorker(),
         // and the channel has been closed before the scheduler processes the event.
@@ -194,7 +221,7 @@ void Server::Execute(std::shared_ptr<const Operation> operation)
         return;
     }
 
-    std::shared_ptr<ipc::Node> client_chan = it->second;
+    std::shared_ptr<ipc::Node> client_chan = it->second.channel;
     chan_mtx_.unlock();
 
     // A client may remove its IPC queue before its destroy event reaches us.

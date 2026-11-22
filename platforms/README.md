@@ -7,8 +7,8 @@ Each platform adapter is split into two parts:
 - `hal`: the XPU adapter layer (XAL). It implements XSched's `HwCommand` and `HwQueue` abstractions on top of the platform driver/runtime APIs.
 - `shim`: the transparent interception layer (XShim). It intercepts application API calls and redirects asynchronous commands to XQueues when XSched is enabled.
 
-AclXSched focuses on the Ascend adapter, which currently implements transparent Level-1 compute scheduling.
-The shared memory scheduling infrastructure and CUDA adapter are inherited from NVXSched; Ascend memory scheduling is under development.
+AclXSched focuses on the Ascend adapter, which supports transparent Level-1 compute scheduling and memory scheduling through xvmm.
+The shared memory scheduling infrastructure and CUDA adapter are inherited from NVXSched.
 Some platforms also provide language bindings or platform-specific tests.
 
 ## XAL
@@ -86,7 +86,7 @@ It intercepts the platform API calls that create queues, submit asynchronous wor
 - `shim.cpp` implements XSched-specific handling for those symbols.
 
 The inherited CUDA shim additionally redirects supported device allocations to managed memory, enabling memory oversubscription without application changes.
-The current Ascend shim does not redirect allocations for oversubscription.
+When xvmm is enabled, the Ascend shim redirects supported device allocations to xvmm for memory oversubscription. See the [Ascend xvmm setup](../README.md#ascend-xvmm).
 
 ## Ascend Support
 

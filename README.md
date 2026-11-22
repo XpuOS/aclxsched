@@ -1,4 +1,4 @@
-# AclXSched: Compute and Memory Scheduling for Ascend NPUs [WIP]
+# AclXSched: Compute and Memory Scheduling for Ascend NPUs
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 
